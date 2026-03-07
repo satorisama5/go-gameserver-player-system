@@ -4,6 +4,7 @@
 **技术栈**：Go, C#, Unity3D, TCP, gRPC, Redis, MongoDB, WebSocket, RabbitMQ
 
 > `unityserverupgrade` 为服务器部分，通过 `go run cmd/gamed` 和 `go run cmd/gatewayd` 启动
+> 其余部分为unity客户端部分，关键是Assets下的文件
 
 ### 核心功能
 创房、查询在线、修改昵称、加入房间、房间聊天、离开房间、查询列表、私聊、移动交互
