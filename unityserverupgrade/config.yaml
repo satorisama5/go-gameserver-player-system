@@ -1,0 +1,29 @@
+server:
+  tcp_port: 8888
+  grpc_port: 9090
+  ws_proxy_port: 8889
+  max_connections: 1000 # 为“限制连接数”功能预留
+  max_packets_per_second: 30   # 【新增】每秒允许接收的最大包数量
+
+  max_player_speed: 150.0
+  spawn_point:
+    x: -613.0
+    y: 99.0
+    z: 0.0
+
+database:
+  mongo_uri: "mongodb://localhost:27017"
+
+cache:
+  redis_addr: "127.0.0.1:6379"
+
+log:
+  level: "debug"
+
+aoi:
+  grid_size: 50
+
+mq:
+  url: "amqp://guest:guest@localhost:5672/"
+  queue_name: "chat_logs"
+

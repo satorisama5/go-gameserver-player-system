@@ -1,0 +1,1591 @@
+    // 内容来自: E:\unity project\unityserverupgrade\cmd\gamed\main.go
+    // cmd/gamed/main.go (最终修正版，可直接替换)
+    package main
+
+    import (
+        "fmt"
+        "google.golang.org/grpc"
+        "log"
+        "net"
+        "unityserverupgrade/internal" // 导入 internal 包
+        "unityserverupgrade/proto"
+    )
+
+    // 这个函数现在只是一个简单的包装，调用 internal 包里的真正实现
+    func StartServer() {
+        // 【修正】必须通过 internal 包名来调用
+        server := internal.NewServer("0.0.0.0", 8888)
+        server.Start()
+    }
+
+    func StartGrpcServer() {
+        lis, err := net.Listen("tcp", "0.0.0.0:9090") // 推荐使用 0.0.0.0
+        if err != nil {
+            log.Fatalf("gRPC failed to listen: %v", err)
+        }
+
+        s := grpc.NewServer()
+
+        proto.RegisterLeaderboardServiceServer(s, &internal.LeaderboardServer{})
+
+        fmt.Println("gRPC 服务器正在监听 :9090...")
+        if err := s.Serve(lis); err != nil {
+            log.Fatalf("gRPC failed to serve: %v", err)
+        }
+    }
+
+    func main() {
+        // 【核心修正】所有对 internal 包内容的调用，都必须加上 "internal." 前缀
+        internal.InitDB()
+        internal.InitRedis()
+
+        internal.WordFilter = internal.NewFilterManager()
+        sensitiveWords := internal.LoadSensitiveWords()
+        internal.WordFilter.Build(sensitiveWords)
+
+        go StartGrpcServer()
+
+        go StartServer()
+
+        //go internal.StartWebSocketProxy(8889, "127.0.0.1:8888")
+
+        fmt.Println("Go 服务端 (TCP + gRPC) 已启动")
+
+        select {}
+    }
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\cmd\gatewayd\main.go
+    package main
+
+    import (
+        "context"
+        "log"
+        "net"
+        "os"
+
+        "github.com/mwitkow/grpc-proxy/proxy"
+        "google.golang.org/grpc"
+        "google.golang.org/grpc/credentials/insecure"
+        "google.golang.org/grpc/metadata"
+    )
+
+    const (
+        gatewayPort = ":8080"
+    )
+
+    func main() {
+        grpcBackendHost := os.Getenv("GRPC_BACKEND_HOST")
+        if grpcBackendHost == "" {
+            grpcBackendHost = "127.0.0.1:9090"
+        }
+        lis, err := net.Listen("tcp", gatewayPort)
+        if err != nil {
+            log.Fatalf("网关监听失败: %v", err)
+
+        }
+
+        // 【修正1】使用新的 grpc.NewClient API，替换掉被弃用的 DialContext
+        backendConn, err := grpc.NewClient(
+            grpcBackendHost,
+            grpc.WithTransportCredentials(insecure.NewCredentials()),
+        )
+        if err != nil {
+            log.Fatalf("无法连接到后端 gRPC 服务: %v", err)
+        }
+
+        // 【修正2】将 director 函数的返回类型精确匹配 StreamDirector 的要求
+        director := func(ctx context.Context, fullMethodName string) (context.Context, grpc.ClientConnInterface, error) {
+            md, _ := metadata.FromIncomingContext(ctx)
+            outCtx := metadata.NewOutgoingContext(ctx, md.Copy())
+
+            // backendConn 是 *grpc.ClientConn 类型，它实现了 grpc.ClientConnInterface 接口，所以可以直接返回
+            return outCtx, backendConn, nil
+        }
+
+        // 创建 gRPC 服务器作为网关
+        // 【修正3】由于 director 的签名现在完全匹配，我们不再需要强制类型转换
+        server := grpc.NewServer(
+            grpc.UnknownServiceHandler(proxy.TransparentHandler(director)),
+        )
+
+        log.Printf("gRPC 透明代理网关正在启动，监听端口 %s...", gatewayPort)
+        log.Printf("  -> 所有 gRPC 流量将被转发到 %s", grpcBackendHost)
+
+        if err := server.Serve(lis); err != nil {
+            log.Fatalf("网关启动失败: %v", err)
+        }
+    }
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\internal\db.go
+    // db.go
+    package internal
+
+    import (
+        "context"
+        "fmt"
+        "log"
+        "os"
+        "time"
+
+        "go.mongodb.org/mongo-driver/bson"
+        "go.mongodb.org/mongo-driver/mongo"
+        "go.mongodb.org/mongo-driver/mongo/options"
+    )
+
+    // 全局 DB 变量
+    var DB *mongo.Database
+    var UserCollection *mongo.Collection
+    var BlacklistCollection *mongo.Collection // 新增集合变量
+    var ChatCollection *mongo.Collection
+
+    var DefaultSensitiveWords = []string{
+        "外挂",
+        "傻",
+        "fuck",
+        "傻逼",
+        "垃圾",
+        "GM",
+        "死",
+        "妈",
+        "全家",
+    }
+
+    // 定义存入数据库的玩家结构 (Model)
+    type PlayerModel struct {
+        UniqueKey string  `bson:"unique_key"`
+        Username  string  `bson:"username"`
+        LastIp    string  `bson:"last_ip"`
+        PositionX float32 `bson:"pos_x"`
+        PositionY float32 `bson:"pos_y"`
+        PositionZ float32 `bson:"pos_z"`
+        UpdatedAt int64   `bson:"updated_at"`
+        LastScene string  `bson:"last_scene"`
+    }
+
+    type ChatLog struct {
+        SessionID string `bson:"session_id"`
+        Sender    string `bson:"sender"`
+        Message   string `bson:"message"` // 存过滤后的内容
+        Timestamp int64  `bson:"timestamp"`
+    }
+
+    func InitDB() {
+        // 设置连接超时
+        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+        defer cancel()
+
+        mongoURI := os.Getenv("MONGO_URI")
+        if mongoURI == "" {
+            mongoURI = "mongodb://localhost:27017"
+        }
+        clientOptions := options.Client().ApplyURI(mongoURI)
+        client, err := mongo.Connect(ctx, clientOptions)
+        if err != nil {
+            log.Fatal("数据库连接失败:", err)
+        }
+
+        // 检查连接
+        err = client.Ping(ctx, nil)
+        if err != nil {
+            log.Fatal("数据库无法 Ping 通:", err)
+        }
+
+        fmt.Println("MongoDB 连接成功！")
+
+        // 获取数据库和集合
+        DB = client.Database("UnityGameDB")
+        UserCollection = DB.Collection("users")
+        BlacklistCollection = DB.Collection("blacklist")
+        ChatCollection = DB.Collection("chat_logs")
+    }
+
+    // 辅助函数：保存/更新玩家数据
+    func SavePlayerToDB(uniqueKey string, name string, pos PlayerPosition, roomName string) {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+
+        filter := bson.M{"unique_key": uniqueKey}
+        update := bson.M{
+            "$set": bson.M{
+                "username":   name,
+                "pos_x":      pos.X,
+                "pos_y":      pos.Y,
+                "pos_z":      pos.Z,
+                "last_scene": roomName,
+                "updated_at": time.Now().Unix(),
+            },
+        }
+        // Upsert: true 表示如果不存在则插入，存在则更新
+        opts := options.Update().SetUpsert(true)
+
+        _, err := UserCollection.UpdateOne(ctx, filter, update, opts)
+        if err != nil {
+            fmt.Println("保存玩家数据失败:", err)
+        }
+    }
+
+    func LoadPlayerFromDB(uniqueKey string) (*PlayerModel, bool) {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+
+        var result PlayerModel
+        filter := bson.M{"unique_key": uniqueKey}
+        err := UserCollection.FindOne(ctx, filter).Decode(&result)
+        if err != nil {
+            return nil, false
+        }
+        return &result, true
+    }
+
+    func DefaultWordsToBson() []interface{} {
+        arr := make([]interface{}, 0, len(DefaultSensitiveWords))
+        for _, w := range DefaultSensitiveWords {
+            arr = append(arr, bson.M{"word": w})
+        }
+        return arr
+    }
+
+    func LoadSensitiveWords() []string {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+
+        cursor, err := BlacklistCollection.Find(ctx, bson.M{})
+        if err != nil {
+            fmt.Println("加载黑名单失败 (可能为空):", err)
+            return DefaultSensitiveWords
+        }
+        defer cursor.Close(ctx)
+
+        var words []string
+        for cursor.Next(ctx) {
+            var result struct {
+                Word string `bson:"word"`
+            }
+            if err := cursor.Decode(&result); err == nil {
+                words = append(words, result.Word)
+            }
+        }
+
+        // 如果数据库内容为空，写入默认词库
+        if len(words) == 0 {
+            fmt.Println("检测到数据库黑名单为空，正在初始化默认词库...")
+            _, err := BlacklistCollection.InsertMany(ctx, DefaultWordsToBson())
+            if err != nil {
+                fmt.Println("默认词库写入失败:", err)
+            }
+            return DefaultSensitiveWords
+        }
+
+        fmt.Printf("成功加载敏感词库: %d 个词\n", len(words))
+        return words
+    }
+
+    func SaveChatLog(sessionID, sender, msg string) {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+
+        logEntry := ChatLog{
+            SessionID: sessionID,
+            Sender:    sender,
+            Message:   msg,
+            Timestamp: time.Now().Unix(),
+        }
+
+        _, err := ChatCollection.InsertOne(ctx, logEntry)
+        if err != nil {
+            fmt.Println("保存聊天记录失败:", err)
+        }
+    }
+
+    // 2. 获取房间最近的 N 条记录
+    func GetRecentChatLogs(sessionID string, limit int64) []ChatLog {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+
+        // 查找条件：room_name 匹配
+        filter := bson.M{"session_id": sessionID}
+
+        // 排序：按时间倒序 (最新的在前面)
+        opts := options.Find().SetSort(bson.D{{"timestamp", -1}}).SetLimit(limit)
+
+        cursor, err := ChatCollection.Find(ctx, filter, opts)
+        if err != nil {
+            return nil
+        }
+        defer cursor.Close(ctx)
+
+        var logs []ChatLog
+        if err = cursor.All(ctx, &logs); err != nil {
+            return nil
+        }
+
+        // 【关键】数据库拿出来的是 [最新, 次新, ... , 最老]
+        // 聊天框显示需要 [最老, ... , 次新, 最新]
+        // 所以我们需要把切片反转一下
+        for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
+            logs[i], logs[j] = logs[j], logs[i]
+        }
+
+        return logs
+    }
+
+    func SavePrivateChatLog(sender, target, msg string) {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+
+        // 生成一个唯一的会话ID，无论 A发给B 还是 B发给A，SessionID 都一样
+        // 简单算法：按字典序排序两个名字，中间加下划线
+        var sessionID string
+        if sender < target {
+            sessionID = "PM_" + sender + "_" + target
+        } else {
+            sessionID = "PM_" + target + "_" + sender
+        }
+
+        logEntry := ChatLog{
+            SessionID: sessionID,
+            Sender:    sender,
+            Message:   msg,
+            Timestamp: time.Now().Unix(),
+        }
+
+        _, err := ChatCollection.InsertOne(ctx, logEntry)
+        if err != nil {
+            fmt.Println("保存私聊记录失败:", err)
+        } else {
+            fmt.Printf("私聊记录已保存: %s -> %s\n", sender, target)
+        }
+    }
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\internal\filter.go
+    package internal
+
+    import (
+        "regexp"
+        "strings"
+        "sync"
+    )
+
+    // 全局过滤器实例
+    var WordFilter *FilterManager
+
+    type FilterManager struct {
+        trieRoot *TrieNode
+        lock     sync.RWMutex
+    }
+
+    // DFA 算法的节点结构 (字典树)
+    type TrieNode struct {
+        children map[rune]*TrieNode
+        isEnd    bool
+    }
+
+    func NewFilterManager() *FilterManager {
+        return &FilterManager{
+            trieRoot: &TrieNode{children: make(map[rune]*TrieNode)},
+        }
+    }
+
+    // 1. 构建字典树 (将数据库查出来的词列表塞入内存)
+    func (this *FilterManager) Build(words []string) {
+        this.lock.Lock()
+        defer this.lock.Unlock()
+
+        this.trieRoot = &TrieNode{children: make(map[rune]*TrieNode)} // 重置树
+
+        for _, word := range words {
+            node := this.trieRoot
+            // 将字符串转为 rune 数组 (处理中文)
+            runes := []rune(word)
+            for _, r := range runes {
+                if _, ok := node.children[r]; !ok {
+                    node.children[r] = &TrieNode{children: make(map[rune]*TrieNode)}
+                }
+                node = node.children[r]
+            }
+            node.isEnd = true
+        }
+    }
+
+    // 2. 敏感词替换 (DFA 算法核心)
+    func (this *FilterManager) Censor(text string) string {
+        this.lock.RLock()
+        defer this.lock.RUnlock()
+
+        chars := []rune(text)
+        length := len(chars)
+        var sb strings.Builder
+
+        for i := 0; i < length; {
+            node := this.trieRoot
+            j := i
+            matchLen := 0
+
+            // 尝试匹配最长敏感词
+            for j < length {
+                next, ok := node.children[chars[j]]
+                if !ok {
+                    break
+                }
+                node = next
+                j++
+                if node.isEnd {
+                    matchLen = j - i // 记录匹配长度
+                }
+            }
+
+            if matchLen > 0 {
+                // 发现敏感词，替换为 *
+                sb.WriteString("***")
+                i += matchLen // 跳过敏感词部分
+            } else {
+                // 不是敏感词，原样追加
+                sb.WriteRune(chars[i])
+                i++
+            }
+        }
+        return sb.String()
+    }
+
+    // 3. 移除 HTML 标签 (防止 <color=red> 破坏 UI)
+    // 使用正则将 <...> 的内容全部替换为空
+    func (this *FilterManager) StripTags(text string) string {
+        // 正则表达式：匹配 < 开头，中间任意字符，> 结尾
+        re := regexp.MustCompile(`<[^>]*>`)
+        return re.ReplaceAllString(text, "")
+    }
+
+    // 综合处理入口
+    func (this *FilterManager) Handle(text string) string {
+        // 先剥离 HTML 标签 (防止有人利用标签绕过屏蔽，比如 <c>操</c>作)
+        cleanText := this.StripTags(text)
+        // 再过滤敏感词
+        safeText := this.Censor(cleanText)
+        return safeText
+    }
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\internal\grpc_server.go
+    // in internal/grpc_server.go
+    package internal
+
+    import (
+        "context"
+        "fmt"
+        "github.com/go-redis/redis/v8"
+        pb "unityserverupgrade/proto"
+    )
+
+    // 【核心修正】将 'l' 改为大写 'L'，将其导出
+    type LeaderboardServer struct {
+        pb.UnimplementedLeaderboardServiceServer
+    }
+
+    // 【对应修正】方法的接收者也要改成大写
+    func (s *LeaderboardServer) SubmitScore(ctx context.Context, req *pb.SubmitScoreRequest) (*pb.SubmitScoreResponse, error) {
+        // ... 方法内部逻辑完全不变 ...
+        fmt.Printf("收到 SubmitScore 请求: Player=%s, Score=%d\n", req.PlayerName, req.Score)
+        err := RDB.ZAdd(Ctx, "leaderboard", &redis.Z{
+            Score:  float64(req.Score),
+            Member: req.PlayerName,
+        }).Err()
+        if err != nil {
+            return &pb.SubmitScoreResponse{Success: false}, err
+        }
+        return &pb.SubmitScoreResponse{Success: true}, nil
+    }
+
+    // 【对应修正】方法的接收者也要改成大写
+    func (s *LeaderboardServer) GetTopPlayers(ctx context.Context, req *pb.GetTopPlayersRequest) (*pb.GetTopPlayersResponse, error) {
+        // ... 方法内部逻辑完全不变 ...
+        fmt.Printf("收到 GetTopPlayers 请求: Limit=%d\n", req.Limit)
+        results, err := RDB.ZRevRangeWithScores(Ctx, "leaderboard", 0, int64(req.Limit-1)).Result()
+        if err != nil {
+            return nil, err
+        }
+        response := &pb.GetTopPlayersResponse{}
+        for i, member := range results {
+            response.Players = append(response.Players, &pb.PlayerRankInfo{
+                Rank:       int32(i + 1),
+                PlayerName: member.Member.(string),
+                Score:      int32(member.Score),
+            })
+        }
+        return response, nil
+    }
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\internal\message.go
+    package internal
+
+    import "encoding/json"
+
+    // C -> S: 客户端上报自己的位置
+    // 后面的表示会被json解析为怎样的字符
+    type PlayerPosition struct {
+        X float32 `json:"x"`
+        Y float32 `json:"y"`
+        Z float32 `json:"z"`
+    }
+
+    // S -> C: 服务器广播的单个玩家状态
+    type PlayerState struct {
+        Name     string         `json:"name"`
+        Position PlayerPosition `json:"pos"`
+    }
+
+    // S -> C: 服务器广播的完整场景状态
+    type SceneStateBroadcast struct {
+        Players map[string]PlayerState `json:"players"`
+    }
+
+    // 通用消息结构，用于识别消息类型
+    type Message struct {
+        ID   int             `json:"id"`
+        Data json.RawMessage `json:"data"` // 使用 RawMessage 延迟解析，非常高效
+    }
+
+    // C# 客户端会将 CommandMessage 对象序列化成 {"cmd":"rename|张三"}
+    // 这个结构体就是用来解析这个 JSON 的
+    type CommandMessage struct {
+        Cmd string `json:"cmd"`
+    } //通常，当你用 json.Unmarshal 解析一个 JSON 字符串到一个结构体时，它会把 JSON 的所有部分都解析并填充到对应的字段里
+
+    // 定义消息ID常量，必须与客户端完全一致
+    // 这部分代码使用 const 关键字定义了一组常量，它们是客户端和服务器之间预先约定好的“协议号”或“消息类型ID”。
+    const (
+        MSG_ID_TEXT_MESSAGE = 0    // S->C 普通文本消息
+        MSG_ID_COMMAND      = 1001 // C->S 客户端发来的文本指令
+
+        MSG_ID_HEARTBEAT = 1002 //
+
+        MSG_ID_SCENE_STATE     = 2001 // S->C 场景状态广播
+        MSG_ID_PLAYER_MOVE_REQ = 2002 // C->S 玩家移动上报
+    )
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\internal\redis.go
+    // redis.go
+    package internal
+
+    import (
+        "context"
+        "fmt"
+        "github.com/go-redis/redis/v8"
+        "os"
+    )
+
+    var RDB *redis.Client
+    var Ctx = context.Background()
+
+    func InitRedis() {
+        addr := os.Getenv("REDIS_ADDR")
+        if addr == "" {
+            addr = "127.0.0.1:6379"
+        }
+
+        RDB = redis.NewClient(&redis.Options{
+            Addr:     addr, // Redis 服务器地址
+            Password: "",   // 没有密码，填空
+            DB:       0,    // 使用默认 DB
+        })
+
+        // 检查连接
+        _, err := RDB.Ping(Ctx).Result()
+        if err != nil {
+            fmt.Println("Redis 连接失败:", err)
+            panic(err)
+        }
+
+        fmt.Println("Redis 连接成功！")
+    }
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\internal\room.go
+    // room.go
+    package internal
+
+    import (
+        "encoding/json"
+        "fmt"
+        "sync"
+        "time"
+    )
+
+    type Room struct {
+        Name       string
+        Members    map[string]*User
+        SessionID  string //用于数据库做标识
+        server     *Server
+        ticker     *time.Ticker // 新增：用于定时广播场景状态的定时器
+        stopChan   chan bool    // 新增：用于停止定时器的通道
+        MaxPlayers int
+        Password   string
+        roomLock   sync.RWMutex
+    }
+
+    // 创建一个新房间并启动其游戏循环
+    func NewRoom(name string, maxPlayers int, password string, server *Server) *Room {
+        room := &Room{
+            Name:       name,
+            SessionID:  fmt.Sprintf("%s_%d", name, time.Now().UnixNano()),
+            Members:    make(map[string]*User),
+            server:     server,
+            ticker:     time.NewTicker(33 * time.Millisecond), //30hz
+            stopChan:   make(chan bool),
+            MaxPlayers: maxPlayers,
+            Password:   password,
+        }
+        go room.Run() // 【重要】在创建时就启动房间的逻辑循环
+        return room
+    }
+
+    // 房间的核心逻辑循环 (游戏循环)
+    func (this *Room) Run() {
+        fmt.Printf("房间 '%s' 的游戏循环已启动...\n", this.Name)
+        for {
+            select {
+            case <-this.ticker.C:
+                // 定时器触发，广播当前场景的所有玩家状态
+                this.BroadcastSceneState()
+            case <-this.stopChan:
+                // 收到停止信号，停止定时器并退出循环
+                this.ticker.Stop()
+                fmt.Printf("房间 '%s' 的游戏循环已停止。\n", this.Name)
+                return
+            }
+        }
+    }
+
+    // 停止房间的循环
+    func (this *Room) Stop() {
+        // 使用 select 防止重复关闭 channel 导致 panic
+        select {
+        case this.stopChan <- true:
+        default:
+        }
+    }
+
+    // 广播场景状态
+    func (this *Room) BroadcastSceneState() {
+        // 【注意】这里需要同时锁住 server.mapLock 和 room 自身的成员列表
+        // 但为了简化，我们假设在房间内的玩家状态不会在广播期间被外部修改
+        // 更严谨的做法是为 Room 的 Members 也增加一个锁
+        this.roomLock.RLock()
+        // 1. 构建场景中所有玩家的状态
+        playerStates := make(map[string]PlayerState)
+        for _, member := range this.Members {
+            playerStates[member.Name] = PlayerState{
+                Name:     member.Name,
+                Position: member.Position,
+            }
+        }
+        this.roomLock.RUnlock()
+
+        // 2. 构建广播消息
+        broadcastData := SceneStateBroadcast{
+            Players: playerStates,
+        }
+        jsonData, _ := json.Marshal(broadcastData)
+
+        // 3. 封装成通用Message格式
+        msg := Message{
+            ID:   MSG_ID_SCENE_STATE,
+            Data: jsonData,
+        }
+        finalMsgBytes, _ := json.Marshal(msg)
+
+        // 4. 在房间内广播
+        for _, member := range this.Members {
+            member.Send(finalMsgBytes)
+        }
+    }
+
+    // 房间内广播【文本】消息
+    func (this *Room) BroadcastTextMessage(sender *User, msg string) {
+        formattedMsg := fmt.Sprintf("[房间:%s][%s]: %s", this.Name, sender.Name, msg)
+
+        // 【核心修改】我们现在需要把消息广播给房间里的【所有人】，包括发送者自己
+        for _, member := range this.Members {
+            // 我们不再需要 if member.Name != sender.Name 这个判断了
+            member.Send(PackTextMessage(formattedMsg))
+        }
+    }
+
+    // 添加成员
+    func (this *Room) AddMember(user *User) {
+        this.roomLock.Lock()
+        this.Members[user.Name] = user
+        this.roomLock.Unlock()
+        user.Room = this
+        this.BroadcastTextMessage(user, "加入了房间")
+    }
+
+    // 移除成员
+    func (this *Room) RemoveMember(user *User) bool {
+        this.BroadcastTextMessage(user, "离开了房间")
+        this.roomLock.Lock()
+        delete(this.Members, user.Name)
+        this.roomLock.Unlock()
+        user.Room = nil
+
+        // 如果房间里没人了，就准备销毁
+        if len(this.Members) == 0 {
+            this.Stop() // 停止游戏循环
+            fmt.Printf("房间 '%s' 因空无一人已被标记为待销毁。\n", this.Name)
+            return true // 【修改】返回 true
+        }
+
+        return false // 【修改】返回 false
+    }
+
+    //func (this *Room) IsFull() bool {
+    //	this.roomLock.RLock()
+    //	defer this.roomLock.RUnlock()
+    //	return len(this.Members) >= this.MaxPlayers
+    //}
+    //
+    //func (this *Room) CheckPassword(inputPwd string) bool {
+    //	// 如果没密码，直接通过
+    //	if this.Password == "" {
+    //		return true
+    //	}
+    //	return this.Password == inputPwd
+    //}
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\internal\server.go
+    package internal
+
+    import (
+        "encoding/binary"
+        "fmt"
+        "io"
+        "net"
+        "sync"
+        "time"
+    )
+
+    const (
+        reqTypeRegister = iota
+        reqTypeUnregister
+        reqTypeBroadcast
+    )
+
+    type request struct {
+        reqType int
+        user    *User
+        msg     []byte
+    }
+
+    type Server struct {
+        Ip   string
+        Port int
+
+        // 【混合模式】保留 mapLock，主要用于保护读操作
+        OnlineMap map[string]*User
+        mapLock   sync.RWMutex
+
+        Rooms    map[string]*Room
+        roomLock sync.RWMutex
+
+        requests chan request
+    }
+
+    func NewServer(ip string, port int) *Server {
+        return &Server{
+            Ip:        ip,
+            Port:      port,
+            OnlineMap: make(map[string]*User),
+            Rooms:     make(map[string]*Room),
+            requests:  make(chan request, 256),
+        }
+    }
+
+    func (this *Server) Start() {
+        listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", this.Ip, this.Port))
+        if err != nil {
+            fmt.Println("net.Listen err:", err)
+            return
+        }
+        defer listener.Close()
+
+        go this.RunLoop()
+
+        for {
+            conn, err := listener.Accept() //关键代码
+            if err != nil {
+                fmt.Println("listener accept err:", err)
+                continue
+            }
+            go this.Handler(conn)
+        }
+    }
+
+    // RunLoop 负责所有的【写】操作，确保写的安全性
+    func (this *Server) RunLoop() {
+        for req := range this.requests {
+            switch req.reqType {
+            case reqTypeRegister:
+                // 写操作，加锁
+                this.mapLock.Lock()
+                this.OnlineMap[req.user.Name] = req.user
+                this.mapLock.Unlock()
+
+                broadcastMsg := "[" + req.user.Addr + "]" + req.user.Name + " 上线啦 (全局消息)"
+                fmt.Println(broadcastMsg)
+
+                // 广播时只读，加读锁
+
+                this.sendBroadcastToAll(broadcastMsg)
+
+            case reqTypeUnregister:
+                this.mapLock.Lock()
+                if _, ok := this.OnlineMap[req.user.Name]; ok {
+                    delete(this.OnlineMap, req.user.Name)
+                    this.mapLock.Unlock() // 先解锁，再广播
+
+                    broadcastMsg := "[" + req.user.Addr + "]" + req.user.Name + " 下线了 (全局消息)"
+                    fmt.Println(broadcastMsg)
+
+                    this.sendBroadcastToAll(broadcastMsg)
+                } else {
+                    this.mapLock.Unlock()
+                }
+
+            case reqTypeBroadcast:
+                this.mapLock.RLock()
+                for _, user := range this.OnlineMap {
+                    user.Send(req.msg)
+                }
+                this.mapLock.RUnlock()
+            }
+        }
+    }
+
+    func (this *Server) Handler(conn net.Conn) {
+        user := NewUser(conn, this)
+        user.Online()
+        defer user.Offline()
+
+        const KeepAliveDuration = 30 * time.Second
+
+        for {
+            _ = conn.SetReadDeadline(time.Now().Add(KeepAliveDuration))
+            head := make([]byte, 2)
+            if _, err := io.ReadFull(conn, head); err != nil {
+                return
+            }
+            msgLen := binary.BigEndian.Uint16(head)
+            body := make([]byte, msgLen)
+            if _, err := io.ReadFull(conn, body); err != nil {
+                return
+            }
+            user.DoMessage(string(body))
+        }
+    }
+
+    func (this *Server) sendBroadcastToAll(msg string) {
+        packedMsg := PackTextMessage(msg)
+        this.mapLock.RLock()
+        for _, user := range this.OnlineMap {
+            user.Send(packedMsg)
+        }
+        this.mapLock.RUnlock()
+    }
+
+    func (this *Server) BroadCast(user *User, msg string) {
+        sendMsg := "[" + user.Addr + "]" + user.Name + ":" + msg
+        req := request{
+            reqType: reqTypeBroadcast,
+            msg:     PackTextMessage(sendMsg),
+        }
+        this.requests <- req
+    }
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\internal\user.go
+    package internal
+
+    import (
+        "bytes"
+        "encoding/binary"
+        "encoding/json"
+        "fmt"
+        "net"
+        "strings"
+        "sync"
+    )
+
+    // CommandHandler 定义了一个指令处理函数的类型签名。
+    // 它接收指令的参数部分，并返回一个 bool 值表示是否应继续执行后续操作。
+    type CommandHandler func(args string) bool
+
+    type User struct {
+        Name     string
+        Addr     string
+        Channel  chan []byte
+        conn     net.Conn
+        server   *Server
+        Room     *Room
+        Position PlayerPosition
+        isOnline bool       // 标记用户是否在线
+        mu       sync.Mutex // 用于保护 isOnline 状态的锁
+        DbKey    string
+
+        // 【新增】指令处理器映射
+        commandHandlers map[string]CommandHandler
+    }
+
+    type RoomInfoDTO struct {
+        Name      string `json:"n"`
+        CurPlayer int    `json:"c"`
+        MaxPlayer int    `json:"m"`
+        HasPwd    bool   `json:"p"`
+    }
+
+    func NewUser(conn net.Conn, server *Server) *User {
+        userAddr := conn.RemoteAddr().String()
+
+        user := &User{
+            Name:     userAddr,
+            Addr:     userAddr,
+            Channel:  make(chan []byte, 256),
+            conn:     conn,
+            server:   server,
+            Room:     nil,
+            Position: PlayerPosition{X: 0, Y: 0, Z: 0},
+            isOnline: true,
+            DbKey:    "",
+        }
+
+        // 【新增】初始化并注册所有带中间件的指令处理器
+        user.commandHandlers = make(map[string]CommandHandler)
+        user.commandHandlers["rename"] = user.LoggingMiddleware(user.HandleRename)
+        user.commandHandlers["who"] = user.LoggingMiddleware(user.HandleListUsers)
+        user.commandHandlers["create"] = user.LoggingMiddleware(user.HandleCreateRoom)
+        user.commandHandlers["join"] = user.LoggingMiddleware(user.HandleJoinRoom)
+        user.commandHandlers["leave"] = user.LoggingMiddleware(user.HandleLeaveRoom)
+        user.commandHandlers["rooms"] = user.LoggingMiddleware(user.HandleListRooms)
+        user.commandHandlers["chat"] = user.LoggingMiddleware(user.HandleRoomChat)
+        user.commandHandlers["pm"] = user.LoggingMiddleware(user.HandlePrivateMessage)
+        user.commandHandlers["users"] = user.LoggingMiddleware(user.HandleGetUsersJSON)
+        user.commandHandlers["shout"] = user.LoggingMiddleware(user.HandleShout)
+
+        fmt.Printf("为用户 %s 启动 ListenMessage 协程...\n", user.Name)
+        go user.ListenMessage()
+
+        return user
+    }
+
+    // LoggingMiddleware 是一个简单的日志中间件。
+    func (this *User) LoggingMiddleware(next CommandHandler) CommandHandler {
+        return func(args string) bool {
+            // 1. 在执行真正的业务逻辑前，先打印日志
+            fmt.Printf("[中间件日志] 用户 [%s] 正在执行指令, 参数: %s\n", this.Name, args)
+            // 2. 调用并返回流水线中的下一个处理器
+            return next(args)
+        }
+    }
+
+    // 用户上线
+    func (this *User) Online() {
+        req := request{
+            reqType: reqTypeRegister,
+            user:    this,
+        }
+        this.server.requests <- req
+    }
+
+    func (this *User) Offline() {
+        // 1. 检查是否已经下线 (防止多次调用)
+        this.mu.Lock()
+        if !this.isOnline {
+            this.mu.Unlock()
+            return
+        }
+        this.isOnline = false
+        this.mu.Unlock()
+
+        // 2. 数据库保存逻辑 (保持不变)
+        if this.DbKey != "" {
+            currentRoomName := ""
+            if this.Room != nil {
+                currentRoomName = this.Room.Name
+            }
+            fmt.Printf("正在保存用户 %s 的数据到数据库 (Key: %s)...\n", this.Name, this.DbKey)
+            // 异步保存，防止阻塞
+            go SavePlayerToDB(this.DbKey, this.Name, this.Position, currentRoomName)
+        }
+
+        // 3. 房间清理逻辑 (保持不变)
+        // 虽然 Map 逻辑移交了，但房间逻辑比较独立，这里先保留处理
+        if this.Room != nil {
+            roomName := this.Room.Name
+            isRoomEmpty := this.Room.RemoveMember(this) // 从房间移除自己
+            if isRoomEmpty {
+                this.server.roomLock.Lock()
+                delete(this.server.Rooms, roomName)
+                this.server.roomLock.Unlock()
+            }
+        }
+
+        req := request{
+            reqType: reqTypeUnregister,
+            user:    this,
+        }
+        this.server.requests <- req
+        // ------------------
+
+        // 5. 清理连接资源
+        this.conn.Close()
+
+        // 关闭自身的 Channel，防止内存泄漏
+        // 使用 recover 防止向已关闭的 channel 发送数据导致的 panic
+        defer func() {
+            if r := recover(); r != nil {
+                // 忽略错误
+            }
+        }()
+        close(this.Channel)
+
+        fmt.Printf("用户 %s 已成功下线并发送注销信号。\n", this.Name)
+    }
+
+    func (this *User) HandleShout(args string) bool {
+        if args == "" {
+            this.Send(PackTextMessage("喊话内容不能为空"))
+            return true
+        }
+
+        // 格式化消息：[世界]张三: 大家好
+        msg := fmt.Sprintf("[世界]%s: %s", this.Name, args)
+
+        // 【关键点】这里调用 Server.BroadCast
+        // 这会将一个 reqTypeBroadcast 的请求扔进 channel
+        // 最终由 Server.RunLoop 的那个 "闲置 case" 处理
+        this.server.BroadCast(this, msg)
+
+        return true
+    }
+
+    // 发送消息 (逻辑不变)
+    func (this *User) Send(data []byte) {
+        defer func() {
+            if r := recover(); r != nil {
+            }
+        }()
+
+        this.mu.Lock()
+        if !this.isOnline {
+            this.mu.Unlock()
+            return
+        }
+        this.mu.Unlock()
+
+        select {
+        case this.Channel <- data:
+        default:
+            fmt.Printf("用户 %s 的消息通道已满，消息被丢弃。\n", this.Name)
+        }
+    }
+
+    // 消息处理入口 (逻辑不变)
+    func (this *User) DoMessage(msg string) {
+        var message Message
+        if err := json.Unmarshal([]byte(msg), &message); err != nil {
+            fmt.Printf("警告: 用户 %s 发送了非JSON格式的消息: %s\n", this.Name, msg)
+            return
+        }
+
+        if message.ID == MSG_ID_HEARTBEAT {
+            return
+        }
+
+        if message.ID != MSG_ID_PLAYER_MOVE_REQ {
+            fmt.Printf("收到来自 [%s] 的消息ID: %d\n", this.Name, message.ID)
+        }
+
+        switch message.ID {
+        case MSG_ID_PLAYER_MOVE_REQ:
+            if this.Room != nil {
+                var pos PlayerPosition
+                if err := json.Unmarshal(message.Data, &pos); err == nil {
+                    this.Position = pos
+                }
+            }
+        case MSG_ID_COMMAND:
+            var cmdMsg CommandMessage
+            if err := json.Unmarshal(message.Data, &cmdMsg); err == nil {
+                this.handleCommand(cmdMsg.Cmd)
+            } else {
+                fmt.Printf("解析CommandMessage失败: %v\n", err)
+            }
+        default:
+            fmt.Printf("收到未知的消息ID: %d\n", message.ID)
+        }
+    }
+
+    // 【重写】handleCommand 方法，使用 map 分发
+    func (this *User) handleCommand(msg string) {
+        fmt.Printf("正在处理来自 [%s] 的指令: %s\n", this.Name, msg)
+        parts := strings.SplitN(msg, "|", 2)
+        command := parts[0]
+        args := ""
+        if len(parts) > 1 {
+            args = strings.TrimSpace(parts[1])
+        }
+
+        if handler, ok := this.commandHandlers[command]; ok {
+            handler(args)
+        } else {
+            this.Send(PackTextMessage("未知指令: " + command))
+        }
+    }
+
+    // 消息打包 (逻辑不变)
+    func PackTextMessage(msg string) []byte {
+        msgData, _ := json.Marshal(msg)
+        jsonMsg, _ := json.Marshal(Message{ID: MSG_ID_TEXT_MESSAGE, Data: msgData})
+        return jsonMsg
+    }
+
+    // --- 所有指令处理器 (已改造) ---
+
+    func (this *User) HandleRename(args string) bool {
+        parts := strings.Split(args, "|")
+        newName := parts[0]
+        uuid := ""
+
+        if len(parts) > 1 {
+            uuid = parts[1]
+        } else {
+            uuid = this.Addr
+        }
+
+        if newName == "" {
+            this.Send(PackTextMessage("昵称不能为空"))
+            return true
+        }
+
+        this.server.mapLock.Lock()
+        if _, ok := this.server.OnlineMap[newName]; ok {
+            this.server.mapLock.Unlock()
+            this.Send(PackTextMessage("昵称已被占用"))
+            return true
+        }
+        this.DbKey = fmt.Sprintf("%s_%s", uuid, newName)
+        this.server.mapLock.Unlock()
+
+        playerData, exists := LoadPlayerFromDB(this.DbKey)
+
+        this.server.mapLock.Lock()
+        if _, ok := this.server.OnlineMap[newName]; ok {
+            this.server.mapLock.Unlock()
+            this.Send(PackTextMessage("昵称已被占用(并发冲突)"))
+            return true
+        }
+
+        delete(this.server.OnlineMap, this.Name)
+        this.server.OnlineMap[newName] = this
+        this.server.mapLock.Unlock()
+
+        oldName := this.Name
+        this.Name = newName
+
+        if this.Room != nil {
+            delete(this.Room.Members, oldName)
+            this.Room.Members[this.Name] = this
+        }
+
+        this.Send(PackTextMessage(fmt.Sprintf("RENAME_SUCCESS|%s", this.Name)))
+
+        if exists {
+            this.Position = PlayerPosition{
+                X: playerData.PositionX,
+                Y: playerData.PositionY,
+                Z: playerData.PositionZ,
+            }
+            restoreMsg := fmt.Sprintf("欢迎回来。上次位置: (%.1f, %.1f)", this.Position.X, this.Position.Y)
+            if playerData.LastScene != "" {
+                this.server.roomLock.RLock()
+                _, roomExists := this.server.Rooms[playerData.LastScene]
+                this.server.roomLock.RUnlock()
+                if roomExists {
+                    saveMsg := fmt.Sprintf("LOAD_SAVE|%s|%.2f,%.2f,%.2f",
+                        playerData.LastScene, this.Position.X, this.Position.Y, this.Position.Z)
+                    this.Send(PackTextMessage(saveMsg))
+                    restoreMsg += " [发现可恢复的房间存档]"
+                } else {
+                    restoreMsg += " [上次所在的房间已解散]"
+                }
+            }
+            this.Send(PackTextMessage(restoreMsg))
+        } else {
+            go SavePlayerToDB(this.DbKey, this.Name, this.Position, "")
+        }
+        return true
+    }
+
+    func (this *User) HandleJoinRoom(args string) bool {
+        parts := strings.Split(args, "|")
+        roomName := parts[0]
+        inputPwd := ""
+        if len(parts) > 1 {
+            inputPwd = parts[1]
+        }
+        this.server.roomLock.Lock()
+
+        room, ok := this.server.Rooms[roomName]
+        if !ok {
+            this.server.roomLock.Unlock()
+            this.Send(PackTextMessage("房间不存在"))
+            return true
+        }
+
+        if len(room.Members) >= room.MaxPlayers {
+            this.server.roomLock.Unlock()
+            this.Send(PackTextMessage("房间已满"))
+            return true
+        }
+
+        if room.Password != "" && room.Password != inputPwd {
+            this.server.roomLock.Unlock()
+            this.Send(PackTextMessage("密码错误"))
+            return true
+        }
+
+        if this.Room != nil {
+            oldRoomName := this.Room.Name
+            isOldRoomEmpty := this.Room.RemoveMember(this)
+            if isOldRoomEmpty {
+                delete(this.server.Rooms, oldRoomName)
+            }
+        }
+
+        this.server.roomLock.Unlock()
+
+        room.AddMember(this)
+        this.Send(PackTextMessage(fmt.Sprintf("成功加入房间 '%s'", roomName)))
+
+        historyLogs := GetRecentChatLogs(room.SessionID, 5)
+
+        if len(historyLogs) > 0 {
+            header := fmt.Sprintf("[房间:%s][系统]: -------------- 历史消息 --------------", roomName)
+            this.Send(PackTextMessage(header))
+            for _, log := range historyLogs {
+                msg := fmt.Sprintf("[房间:%s][历史-%s]: %s", roomName, log.Sender, log.Message)
+                this.Send(PackTextMessage(msg))
+            }
+            footer := fmt.Sprintf("[房间:%s][系统]: -------------------------------------", roomName)
+            this.Send(PackTextMessage(footer))
+        }
+        return true
+    }
+
+    func (this *User) HandleListUsers(args string) bool {
+        this.server.mapLock.RLock()
+        defer this.server.mapLock.RUnlock()
+        var userList []string
+        for _, user := range this.server.OnlineMap {
+            userList = append(userList, user.Name)
+        }
+        this.Send(PackTextMessage("当前在线用户列表: " + strings.Join(userList, ", ")))
+        return true
+    }
+
+    func (this *User) HandleCreateRoom(args string) bool {
+        parts := strings.Split(args, "|")
+        roomName := parts[0]
+        maxPlayers := 4
+        password := ""
+        if roomName == "" {
+            this.Send(PackTextMessage("房间名不能为空"))
+            return true
+        }
+        if len(parts) > 1 {
+            fmt.Sscanf(parts[1], "%d", &maxPlayers)
+            if maxPlayers < 1 {
+                maxPlayers = 1
+            }
+            if maxPlayers > 20 {
+                maxPlayers = 20
+            }
+        }
+
+        if len(parts) > 2 {
+            password = parts[2]
+        }
+        this.server.roomLock.Lock()
+        defer this.server.roomLock.Unlock()
+        if _, ok := this.server.Rooms[roomName]; ok {
+            this.Send(PackTextMessage("房间已存在"))
+            return true
+        }
+        if this.Room != nil {
+            oldRoomName := this.Room.Name
+            isOldRoomEmpty := this.Room.RemoveMember(this)
+            if isOldRoomEmpty {
+                delete(this.server.Rooms, oldRoomName)
+            }
+        }
+        newRoom := NewRoom(roomName, maxPlayers, password, this.server)
+        this.server.Rooms[roomName] = newRoom
+        newRoom.AddMember(this)
+        this.Send(PackTextMessage(fmt.Sprintf("房间 '%s' 创建成功", roomName)))
+        return true
+    }
+
+    func (this *User) HandleLeaveRoom(args string) bool {
+        if this.Room == nil {
+            this.Send(PackTextMessage("你不在任何房间中"))
+            return true
+        }
+        roomName := this.Room.Name
+        isRoomEmpty := this.Room.RemoveMember(this)
+        if isRoomEmpty {
+            this.server.roomLock.Lock()
+            delete(this.server.Rooms, roomName)
+            this.server.roomLock.Unlock()
+        }
+        this.Send(PackTextMessage("LEAVE_SUCCESS|你已成功离开房间"))
+        return true
+    }
+
+    func (this *User) HandleListRooms(args string) bool {
+        this.server.roomLock.RLock()
+        defer this.server.roomLock.RUnlock()
+
+        if len(this.server.Rooms) == 0 {
+            this.Send(PackTextMessage("当前没有可用房间"))
+            return true
+        }
+
+        var dtos []RoomInfoDTO
+        for _, r := range this.server.Rooms {
+            info := RoomInfoDTO{
+                Name:      r.Name,
+                CurPlayer: len(r.Members),
+                MaxPlayer: r.MaxPlayers,
+                HasPwd:    r.Password != "",
+            }
+            dtos = append(dtos, info)
+        }
+
+        jsonBytes, _ := json.Marshal(dtos)
+        this.Send(PackTextMessage("ROOM_LIST|" + string(jsonBytes)))
+        return true
+    }
+
+    func (this *User) HandleRoomChat(args string) bool {
+        if this.Room == nil {
+            this.Send(PackTextMessage("你不在任何房间中，无法发送房间消息"))
+            return true
+        }
+
+        safeMsg := WordFilter.Handle(args)
+        if len(strings.TrimSpace(safeMsg)) == 0 {
+            this.Send(PackTextMessage("不能发送空消息或非法字符"))
+            return true
+        }
+        this.Room.BroadcastTextMessage(this, safeMsg)
+
+        go SaveChatLog(this.Room.SessionID, this.Name, safeMsg)
+        return true
+    }
+
+    func (this *User) HandlePrivateMessage(args string) bool {
+        pmParts := strings.SplitN(args, "|", 2)
+        if len(pmParts) != 2 {
+            this.Send(PackTextMessage("私聊格式错误, 应为: pm|用户名|消息内容"))
+            return true
+        }
+
+        targetName := pmParts[0]
+        msg := pmParts[1]
+
+        this.server.mapLock.RLock()
+        targetUser, ok := this.server.OnlineMap[targetName]
+        this.server.mapLock.RUnlock()
+
+        if !ok {
+            this.Send(PackTextMessage(fmt.Sprintf("用户 '%s' 不在线或不存在", targetName)))
+            return true
+        }
+        if targetUser.Name == this.Name {
+            this.Send(PackTextMessage("不能给自己发私聊"))
+            return true
+        }
+
+        safeMsg := WordFilter.Handle(msg)
+        //给目标
+        formattedMsg := fmt.Sprintf("[私聊][%s对你说]: %s", this.Name, safeMsg)
+        targetUser.Send(PackTextMessage(formattedMsg))
+
+        // 发送给自己（回显）
+        formattedMsgToSelf := fmt.Sprintf("[私聊][你对%s说]: %s", targetName, safeMsg)
+        this.Send(PackTextMessage(formattedMsgToSelf))
+
+        // 【新增】保存到数据库
+        go SavePrivateChatLog(this.Name, targetName, safeMsg)
+
+        return true
+    }
+
+    func (this *User) HandleGetUsersJSON(args string) bool {
+        this.server.mapLock.RLock()
+        defer this.server.mapLock.RUnlock()
+
+        var userList []string
+        for name := range this.server.OnlineMap {
+            // 也可以在这里直接过滤掉自己，或者交给客户端过滤
+            // 为了通用性，我们返回所有人
+            userList = append(userList, name)
+        }
+
+        // 序列化为 JSON
+        jsonBytes, _ := json.Marshal(userList)
+
+        // 发送消息头 USER_LIST|JSON数据
+        this.Send(PackTextMessage("USER_LIST|" + string(jsonBytes)))
+        return true
+    }
+
+    // 监听消息 (逻辑不变)
+    func (this *User) ListenMessage() {
+        fmt.Printf("用户 %s 的 ListenMessage 协程已成功开始运行。\n", this.Name)
+        for data := range this.Channel {
+            bytebuf := bytes.NewBuffer([]byte{})
+            binary.Write(bytebuf, binary.BigEndian, int16(len(data)))
+            binary.Write(bytebuf, binary.BigEndian, data)
+            finalData := bytebuf.Bytes()
+
+            if _, err := this.conn.Write(finalData); err != nil {
+                break
+            }
+        }
+    }
+
+
+    ========================================
+
+    // 内容来自: E:\unity project\unityserverupgrade\internal\ws_proxy.go
+    package internal
+
+    import (
+        "encoding/binary"
+        "fmt"
+        "io"
+        "log"
+        "net"
+        "net/http"
+
+        "github.com/gorilla/websocket"
+    )
+
+    var upgrader = websocket.Upgrader{
+        CheckOrigin: func(r *http.Request) bool { return true }, // 允许跨域
+    }
+
+    // 启动 WebSocket 代理
+    func StartWebSocketProxy(wsPort int, tcpAddr string) {
+        http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+            handleWS(w, r, tcpAddr)
+        })
+
+        log.Printf("WebSocket 代理启动: :%d -> %s", wsPort, tcpAddr)
+        if err := http.ListenAndServe(fmt.Sprintf(":%d", wsPort), nil); err != nil {
+            log.Fatal("WS 启动失败:", err)
+        }
+    }
+
+    func handleWS(w http.ResponseWriter, r *http.Request, tcpAddr string) {
+        // 1. 升级 HTTP 为 WebSocket
+        wsConn, err := upgrader.Upgrade(w, r, nil)
+        if err != nil {
+            return
+        }
+        defer wsConn.Close()
+
+        // 2. 连接本地 TCP 游戏服
+        tcpConn, err := net.Dial("tcp", tcpAddr)
+        if err != nil {
+            log.Println("连接 TCP 失败:", err)
+            return
+        }
+        defer tcpConn.Close()
+
+        // 3. 开始双向转发
+        errChan := make(chan error, 2)
+
+        // A. WS -> TCP (加上 2字节长度头)
+        go func() {
+            for {
+                _, msg, err := wsConn.ReadMessage()
+                if err != nil {
+                    errChan <- err
+                    return
+                }
+                // 封装协议头
+                header := make([]byte, 2)
+                binary.BigEndian.PutUint16(header, uint16(len(msg)))
+
+                // 发送头 + 体
+                tcpConn.Write(header)
+                tcpConn.Write(msg)
+            }
+        }()
+
+        // B. TCP -> WS (去掉 2字节长度头)
+        go func() {
+            header := make([]byte, 2)
+            for {
+                // 读头
+                if _, err := io.ReadFull(tcpConn, header); err != nil {
+                    errChan <- err
+                    return
+                }
+                length := binary.BigEndian.Uint16(header)
+
+                // 读体
+                body := make([]byte, length)
+                if _, err := io.ReadFull(tcpConn, body); err != nil {
+                    errChan <- err
+                    return
+                }
+
+                // 直接发给 WS (WS 协议自带分包，不需要头)
+                if err := wsConn.WriteMessage(websocket.TextMessage, body); err != nil {
+                    errChan <- err
+                    return
+                }
+            }
+        }()
+
+        <-errChan // 等待任意一方断开
+    }
+
+
+
+

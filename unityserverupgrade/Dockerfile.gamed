@@ -1,0 +1,22 @@
+FROM golang:1.24.3
+
+WORKDIR /app
+
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+ENV GOPROXY=https://goproxy.cn,direct
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+# 复制所有源码（包含 config.yaml）
+COPY . .
+
+# 编译
+RUN go build -o gamed ./cmd/gamed
+
+# 暴露端口 (TCP, gRPC)
+EXPOSE 8888 9090
+
+# 启动
+CMD ["./gamed"]
