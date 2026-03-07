@@ -22,3 +22,7 @@ Thumbs.db
 
 # JetBrains
 .idea/
+
+exe/
+Assets/TextMesh Pro/
+Assets/NuGet/
