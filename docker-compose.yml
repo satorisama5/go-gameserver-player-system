@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  # 1. MongoDB
+  mongo:
+    image: mongo:latest
+    container_name: unity_mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  # 2. Redis
+  redis:
+    image: redis:alpine
+    container_name: unity_redis
+    ports:
+      - "6379:6379"
+
+  # 3. RabbitMQ (新增!)
+  rabbitmq:
+    image: rabbitmq:3-management  # 使用带管理界面的版本
+    container_name: unity_rabbitmq
+    ports:
+      - "5672:5672"   # 消息队列通信端口
+      - "15672:15672" # 网页管理后台端口 (访问 http://localhost:15672, 账号guest/guest)
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+  # 4. 游戏服务器
+  gamed:
+    build:
+      context: .
+      dockerfile: Dockerfile.gamed
+    container_name: unity_gamed
+    ports:
+      - "8888:8888" # TCP
+      - "9090:9090" # gRPC
+    environment:
+      # 【核心技巧】通过环境变量覆盖 config.yaml 的本地配置
+      # 格式通常是: 结构体层级_字段名 (大写)
+      # 必须配合 Go 代码中的 viper.AutomaticEnv() 使用
+      - SERVER_TCP_PORT=8888
+      - DATABASE_MONGO_URI=mongodb://mongo:27017 # 注意这里用了 mongo 服务名
+      - CACHE_REDIS_ADDR=redis:6379             # 注意这里用了 redis 服务名
+      - MQ_URL=amqp://guest:guest@rabbitmq:5672/ # 注意这里用了 rabbitmq 服务名
+    depends_on:
+      - mongo
+      - redis
+      - rabbitmq
+    # 挂载本地 config.yaml 到容器里，防止打包时漏掉，且方便修改
+    volumes:
+      - ./config.yaml:/app/config.yaml
+
+  # 5. API 网关
+  gatewayd:
+    build:
+      context: .
+      dockerfile: Dockerfile.gatewayd
+    container_name: unity_gatewayd
+    ports:
+      - "8080:8080"
+    environment:
+      - GRPC_BACKEND_HOST=gamed:9090
+    depends_on:
+      - gamed
+
+volumes:
+  mongo_data:

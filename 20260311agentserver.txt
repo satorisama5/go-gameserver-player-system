@@ -1,0 +1,2903 @@
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\cmd\combat\main.go
+package main
+
+import (
+	"context"
+	"log"
+	"net"
+	"os"
+
+	"go-server/internal/protocol"
+	"go-server/internal/services"
+	riftofog "go-server/pkg/protocol"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+)
+
+const defaultAddr = ":50051"
+
+type server struct {
+	riftofog.UnimplementedCombatServiceServer   //unimplement，后面我们要实现这个接口
+}
+
+func (s *server) ExecuteAction(ctx context.Context, in *riftofog.ActionRequest) (*riftofog.ActionResult, error) {
+	req := toProtocolRequest(in)
+	log.Printf("[combat] ExecuteAction action_key=%s hp=%d ap=%d", req.ActionKey, req.Hp, req.Ap)
+	out := services.ExecuteCombatAction(req)
+	if out != nil {
+		log.Printf("[combat] result success=%v result_text=%q", out.Success, out.ResultText)
+	}
+	return toProtoResult(out), nil
+}
+
+func toProtocolRequest(in *riftofog.ActionRequest) *protocol.ActionRequest {
+	if in == nil {
+		return &protocol.ActionRequest{}
+	}
+	return &protocol.ActionRequest{
+		ActionKey:   in.GetActionKey(),
+		Str:         in.GetStr(),
+		IntVal:      in.GetIntVal(),
+		Lck:         in.GetLck(),
+		Stealth:     in.GetStealth(),
+		Hp:          in.GetHp(),
+		Ap:          in.GetAp(),
+		Status:      in.GetStatus(),
+		EnemyType:   in.GetEnemyType(),
+		RoomContent: in.GetRoomContent(),
+	}
+}
+
+func toProtoResult(r *protocol.ActionResult) *riftofog.ActionResult {
+	if r == nil {
+		return &riftofog.ActionResult{}
+	}
+	return &riftofog.ActionResult{
+		Success:     r.Success,
+		ResultText:  r.ResultText,
+		HpDelta:     r.HpDelta,
+		ApDelta:     r.ApDelta,
+		NewStatus:   r.NewStatus,
+		ClearStatus: r.ClearStatus,
+		Reward:      r.Reward,
+	}
+}
+
+func main() {
+	addr := os.Getenv("COMBAT_GRPC_ADDR")
+	if addr == "" {
+		addr = defaultAddr
+	}
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("combat listen: %v", err)
+	}
+	srv := grpc.NewServer()   //创建服务器并监听
+	riftofog.RegisterCombatServiceServer(srv, &server{})
+	reflection.Register(srv)
+	log.Printf("[combat] gRPC listening on %s", addr)
+	if err := srv.Serve(lis); err != nil {
+		log.Fatal(err)
+	}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\cmd\event\main.go
+package main
+
+import (
+	"context"
+	"log"
+	"net"
+	"os"
+
+	"go-server/internal/protocol"
+	"go-server/internal/services"
+	riftofog "go-server/pkg/protocol"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+)
+
+const defaultAddr = ":50052"
+
+type server struct {
+	riftofog.UnimplementedEventServiceServer
+}
+
+func (s *server) ExecuteAction(ctx context.Context, in *riftofog.ActionRequest) (*riftofog.ActionResult, error) {
+	req := toProtocolRequest(in)
+	log.Printf("[event] ExecuteAction action_key=%s", req.ActionKey)
+	out := services.ExecuteEventAction(req)
+	if out != nil {
+		log.Printf("[event] result success=%v result_text=%q", out.Success, out.ResultText)
+	}
+	return toProtoResult(out), nil
+}
+
+func toProtocolRequest(in *riftofog.ActionRequest) *protocol.ActionRequest {
+	if in == nil {
+		return &protocol.ActionRequest{}
+	}
+	return &protocol.ActionRequest{
+		ActionKey:   in.GetActionKey(),
+		Str:         in.GetStr(),
+		IntVal:      in.GetIntVal(),
+		Lck:         in.GetLck(),
+		Stealth:     in.GetStealth(),
+		Hp:          in.GetHp(),
+		Ap:          in.GetAp(),
+		Status:      in.GetStatus(),
+		EnemyType:   in.GetEnemyType(),
+		RoomContent: in.GetRoomContent(),
+	}
+}
+
+func toProtoResult(r *protocol.ActionResult) *riftofog.ActionResult {
+	if r == nil {
+		return &riftofog.ActionResult{}
+	}
+	return &riftofog.ActionResult{
+		Success:     r.Success,
+		ResultText:  r.ResultText,
+		HpDelta:     r.HpDelta,
+		ApDelta:     r.ApDelta,
+		NewStatus:   r.NewStatus,
+		ClearStatus: r.ClearStatus,
+		Reward:      r.Reward,
+	}
+}
+
+func main() {
+	addr := os.Getenv("EVENT_GRPC_ADDR")
+	if addr == "" {
+		addr = defaultAddr
+	}
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("event listen: %v", err)
+	}
+	srv := grpc.NewServer()
+	riftofog.RegisterEventServiceServer(srv, &server{})
+	reflection.Register(srv)
+	log.Printf("[event] gRPC listening on %s", addr)
+	if err := srv.Serve(lis); err != nil {
+		log.Fatal(err)
+	}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\cmd\resource\main.go
+package main
+
+import (
+	"context"
+	"log"
+	"net"
+	"os"
+
+	"go-server/internal/protocol"
+	"go-server/internal/services"
+	riftofog "go-server/pkg/protocol"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+)
+
+const defaultAddr = ":50053"
+
+type server struct {
+	riftofog.UnimplementedResourceServiceServer
+}
+
+func (s *server) ExecuteAction(ctx context.Context, in *riftofog.ActionRequest) (*riftofog.ActionResult, error) {
+	req := toProtocolRequest(in)
+	log.Printf("[resource] ExecuteAction action_key=%s", req.ActionKey)
+	out := services.ExecuteResourceAction(req)
+	if out != nil {
+		log.Printf("[resource] result success=%v result_text=%q", out.Success, out.ResultText)
+	}
+	return toProtoResult(out), nil
+}
+
+func toProtocolRequest(in *riftofog.ActionRequest) *protocol.ActionRequest {
+	if in == nil {
+		return &protocol.ActionRequest{}
+	}
+	return &protocol.ActionRequest{
+		ActionKey:   in.GetActionKey(),
+		Str:         in.GetStr(),
+		IntVal:      in.GetIntVal(),
+		Lck:         in.GetLck(),
+		Stealth:     in.GetStealth(),
+		Hp:          in.GetHp(),
+		Ap:          in.GetAp(),
+		Status:      in.GetStatus(),
+		EnemyType:   in.GetEnemyType(),
+		RoomContent: in.GetRoomContent(),
+	}
+}
+
+func toProtoResult(r *protocol.ActionResult) *riftofog.ActionResult {
+	if r == nil {
+		return &riftofog.ActionResult{}
+	}
+	return &riftofog.ActionResult{
+		Success:     r.Success,
+		ResultText:  r.ResultText,
+		HpDelta:     r.HpDelta,
+		ApDelta:     r.ApDelta,
+		NewStatus:   r.NewStatus,
+		ClearStatus: r.ClearStatus,
+		Reward:      r.Reward,
+	}
+}
+
+func main() {
+	addr := os.Getenv("RESOURCE_GRPC_ADDR")
+	if addr == "" {
+		addr = defaultAddr
+	}
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("resource listen: %v", err)
+	}
+	srv := grpc.NewServer()
+	riftofog.RegisterResourceServiceServer(srv, &server{})
+	reflection.Register(srv)
+	log.Printf("[resource] gRPC listening on %s", addr)
+	if err := srv.Serve(lis); err != nil {
+		log.Fatal(err)
+	}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\cmd\server\main.go
+package main
+
+import (
+	"bufio"
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+
+	"go-server/internal/gateway"
+	"go-server/internal/pool"
+	"go-server/internal/repository"
+	riftofog "go-server/pkg/protocol"
+
+	"google.golang.org/grpc"
+)
+
+func main() {
+	loadEnvFile(".env")
+
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+	redisPass := getEnv("REDIS_PASSWORD", "")
+	httpAddr := getEnv("HTTP_ADDR", ":8080")
+	combatAddr := getEnv("COMBAT_GRPC_ADDR", "localhost:50051")
+	eventAddr := getEnv("EVENT_GRPC_ADDR", "localhost:50052")
+	resourceAddr := getEnv("RESOURCE_GRPC_ADDR", "localhost:50053")
+
+	var redisRepo *repository.Repository
+	if r, err := repository.New(redisAddr, redisPass, 0); err != nil {
+		log.Printf("[warn] redis not available: %v (communication will not be stored)", err)
+	} else {
+		redisRepo = r
+		defer redisRepo.Close()
+	}
+
+	const grpcPoolSize = 3
+	var combatClient riftofog.CombatServiceClient
+	var eventClient riftofog.EventServiceClient
+	var resourceClient riftofog.ResourceServiceClient
+	if combatPool, err := pool.NewPool(combatAddr, grpcPoolSize); err != nil {
+		log.Printf("[warn] combat gRPC not available: %v", err)
+	} else {
+		defer combatPool.Close()
+		combatClient = &combatClientFromPool{pool: combatPool}
+	}
+	if eventPool, err := pool.NewPool(eventAddr, grpcPoolSize); err != nil {
+		log.Printf("[warn] event gRPC not available: %v", err)
+	} else {
+		defer eventPool.Close()
+		eventClient = &eventClientFromPool{pool: eventPool}
+	}
+	if resourcePool, err := pool.NewPool(resourceAddr, grpcPoolSize); err != nil {
+		log.Printf("[warn] resource gRPC not available: %v", err)
+	} else {
+		defer resourcePool.Close()
+		resourceClient = &resourceClientFromPool{pool: resourcePool}
+	}
+
+	wsHandler := &gateway.Handler{
+		Redis:    redisRepo,
+		Combat:   combatClient,
+		Event:    eventClient,
+		Resource: resourceClient,
+	}
+	handler := gateway.Route(wsHandler)  //注册服务路由 将http连接升级
+
+	log.Printf("[server] listening on %s", httpAddr)
+	if err := http.ListenAndServe(httpAddr, handler); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func getEnv(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
+}
+
+// loadEnvFile 从 .env 读取 KEY=VALUE 并设置到环境变量（忽略空行和 # 注释）。
+func loadEnvFile(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if i := strings.Index(line, "="); i > 0 {
+			key := strings.TrimSpace(line[:i])
+			val := strings.TrimSpace(line[i+1:])
+			if key != "" && os.Getenv(key) == "" {
+				_ = os.Setenv(key, val)
+			}
+		}
+	}
+}
+
+// 以下为基于连接池的 gRPC 客户端包装，每次请求通过 pool.Get() 轮询取连接，不改变 gateway 业务逻辑。
+
+type combatClientFromPool struct{ pool *pool.Pool }
+
+func (c *combatClientFromPool) ExecuteAction(ctx context.Context, in *riftofog.ActionRequest, opts ...grpc.CallOption) (*riftofog.ActionResult, error) {
+	return riftofog.NewCombatServiceClient(c.pool.Get()).ExecuteAction(ctx, in, opts...)
+}
+
+type eventClientFromPool struct{ pool *pool.Pool }
+
+func (c *eventClientFromPool) ExecuteAction(ctx context.Context, in *riftofog.ActionRequest, opts ...grpc.CallOption) (*riftofog.ActionResult, error) {
+	return riftofog.NewEventServiceClient(c.pool.Get()).ExecuteAction(ctx, in, opts...)
+}
+
+type resourceClientFromPool struct{ pool *pool.Pool }
+
+func (c *resourceClientFromPool) ExecuteAction(ctx context.Context, in *riftofog.ActionRequest, opts ...grpc.CallOption) (*riftofog.ActionResult, error) {
+	return riftofog.NewResourceServiceClient(c.pool.Get()).ExecuteAction(ctx, in, opts...)
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\gateway\protocol.go
+package gateway
+
+import "go-server/internal/protocol"
+
+// 与 proto 一致的 Go 结构体，复用于 WebSocket JSON 与 Redis 序列化。
+// 定义见 internal/protocol，此处仅做类型别名便于 gateway 包内使用。
+type (
+	StateChanges   = protocol.StateChanges
+	UnityRequest   = protocol.UnityRequest
+	ServerResponse = protocol.ServerResponse
+)
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\gateway\router.go
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const doubaoChatURL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+
+// getDoubaoChatModel 从环境变量 DOUBAO_CHAT_MODEL 读取，默认带版本 doubao-seed-1-8-251228。
+func getDoubaoChatModel() string {
+	if s := strings.TrimSpace(os.Getenv("DOUBAO_CHAT_MODEL")); s != "" {
+		return s
+	}
+	return "doubao-seed-1-8-251228"
+}
+
+// getDoubaoTimeout 从环境变量 DOUBAO_TIMEOUT 或 GEMINI_TIMEOUT 读取（如 30、30s），默认 30s。
+func getDoubaoTimeout() time.Duration {
+	s := os.Getenv("DOUBAO_TIMEOUT")
+	if s == "" {
+		s = os.Getenv("GEMINI_TIMEOUT")
+	}
+	if s == "" {
+		return 30 * time.Second
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		return d
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 30 * time.Second
+}
+
+const systemPrompt = `你是《迷雾裂隙》游戏的AI路由器。
++;
+你会收到一个JSON，包含：
+- message：玩家的自然语言指令（中文，需按语义理解）
+- room_type：当前房间类型（这是强制约束）
+- 角色属性：hp/ap/str/int_val/lck/stealth/status
+- recent_decisions：最近历史决策（可能含「玩家风格:...」描述该玩家偏好与成功率，请参考）
+- path_hints：路径提示
+- future_paths：从当前节点出发后续2～3层房间类型序列，可结合后续路径推荐省AP或补资源的策略
+
+重要规则：
+1. 你只能从 room_type 对应的 action_key 中选择，绝对不能跨房间类型。
+   Combat:   strong_attack / lure / stealth_pass / negotiate
+   Event:    investigate / destroy / ignore / gamble
+   Resource: grab_all / careful_check / trade / mark_location
+   PathChoice: 返回路径索引 0/1/2/3
+
+2. 语义对应必须识别：玩家说法只要和某个行为明显对应，就必须返回该 action_key，不得判为无关。
+   Combat 常见说法示例（含同义表述）：
+   - "潜行/逃走/溜走/悄悄/绕过/不想损失/不想受伤/想少掉血/潜行逃走/想先潜行过去" → stealth_pass
+   - "直接打/硬刚/强攻" → strong_attack
+   - "引开/分散再打" → lure
+   - "谈一谈/撤退/不打了" → negotiate
+   Event: 调查/研究→investigate，破坏/砸→destroy，忽略/不管→ignore，赌/祈祷→gamble
+   Resource: 全拿/拾取→grab_all，检查/小心→careful_check，交易/买→trade，标记→mark_location
+
+3. 如果玩家说的话和当前房间类型无关但可推断（比如在战斗房间说"我想要宝藏"），
+   结合当前房间、属性、path_hints、future_paths 推断最优解（如潜行省AP为后续资源房做准备）。
+
+4. 仅当玩家输入完全无关、无法对应到任何当前房间行为时（如"今天天气真好"），才返回：
+   { "service": "当前room_type", "action_key": "", "reasoning": "我不太理解，请输入与当前房间相关的指令，如：强攻、潜行、调查等" }
+
+5. service 字段必须永远等于输入的 room_type。
+
+只返回一个JSON，不要多余文字：
+{"service":"Combat","action_key":"stealth_pass","reasoning":"理由"}
+`
+
+// RouteIntent 用豆包对自然语言做意图分类，返回 service、action_key、reasoning。
+// 解析失败时按 room_type 做 fallback。
+func RouteIntent(ctx context.Context, req *UnityRequest) (service, actionKey, reasoning string, err error) {
+	log.Printf("[intent] RouteIntent start message=%q room=%s", req.Message, req.RoomType)
+	apiKey := os.Getenv("DOUBAO_API_KEY")
+	if apiKey == "" {
+		log.Printf("[intent] DOUBAO_API_KEY empty, using fallback")
+		service, actionKey, reasoning = fallbackIntent(req.RoomType, req.Message)
+		return service, actionKey, reasoning, nil
+	}
+
+	userJSON, err := json.Marshal(req)
+	if err != nil {
+		log.Printf("[intent] marshal req err=%v, fallback", err)
+		service, actionKey, reasoning = fallbackIntent(req.RoomType, req.Message)
+		return service, actionKey, reasoning, nil
+	}
+	fullText := systemPrompt + "\n\n" + string(userJSON)
+
+	timeout := getDoubaoTimeout()
+	log.Printf("[intent] callDoubao start timeout=%v model=%s", timeout, getDoubaoChatModel())
+	text, err := callDoubao(ctx, fullText, timeout)
+	if err != nil {
+		log.Printf("[intent] callDoubao err=%v, fallback", err)
+		service, actionKey, reasoning = fallbackIntent(req.RoomType, req.Message)
+		return service, actionKey, reasoning, err
+	}
+	log.Printf("[intent] callDoubao done response_len=%d", len(text))
+
+	service, actionKey, reasoning, err = parseIntentResponse(text)
+	if err != nil {
+		log.Printf("[intent] parseIntentResponse err=%v raw=%q, fallback", err, truncStr(text, 120))
+		service, actionKey, reasoning = fallbackIntent(req.RoomType, req.Message)
+		return service, actionKey, reasoning, nil
+	}
+	// 安全网：LLM 返回 action_key 为空但玩家输入明显对应某行为时，用关键词覆盖，避免误判为无关
+	if actionKey == "" && strings.TrimSpace(req.Message) != "" {
+		if overrideAction, overrideReason, ok := tryKeywordOverride(req.RoomType, req.Message); ok {
+			actionKey = overrideAction
+			reasoning = overrideReason
+			log.Printf("[intent] keyword override applied actionKey=%q (message had clear intent)", actionKey)
+		}
+	}
+	log.Printf("[intent] parse done service=%s actionKey=%q reasoning=%q", service, actionKey, truncStr(reasoning, 60))
+	return service, actionKey, reasoning, nil
+}
+
+func truncStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+// tryKeywordOverride 当 LLM 返回 action_key 为空时，用关键词推断并覆盖。返回 (actionKey, reasoning, true) 或 ("", "", false)。
+func tryKeywordOverride(roomType string, message string) (actionKey, reasoning string, ok bool) {
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		return "", "", false
+	}
+	switch roomType {
+	case "Combat":
+		if strings.Contains(msg, "潜行") || strings.Contains(msg, "逃走") || strings.Contains(msg, "溜走") || strings.Contains(msg, "悄悄") ||
+			strings.Contains(msg, "绕过") || strings.Contains(msg, "不想损失") || strings.Contains(msg, "不想受伤") || strings.Contains(msg, "偷偷") {
+			return "stealth_pass", "根据你的表述（潜行/少损失）推荐潜行绕过", true
+		}
+		if strings.Contains(msg, "引") || strings.Contains(msg, "分散") {
+			return "lure", "根据你的表述推荐引诱分散", true
+		}
+		if strings.Contains(msg, "谈判") || strings.Contains(msg, "撤退") {
+			return "negotiate", "根据你的表述推荐谈判撤退", true
+		}
+		if strings.Contains(msg, "强攻") || strings.Contains(msg, "打") || strings.Contains(msg, "硬刚") {
+			return "strong_attack", "根据你的表述推荐强攻", true
+		}
+	case "Event":
+		if strings.Contains(msg, "调查") || strings.Contains(msg, "研究") {
+			return "investigate", "根据表述推荐调查", true
+		}
+		if strings.Contains(msg, "破坏") || strings.Contains(msg, "砸") {
+			return "destroy", "根据表述推荐破坏", true
+		}
+		if strings.Contains(msg, "忽略") || strings.Contains(msg, "不管") {
+			return "ignore", "根据表述推荐忽略", true
+		}
+		if strings.Contains(msg, "赌") || strings.Contains(msg, "祈祷") {
+			return "gamble", "根据表述推荐赌博", true
+		}
+	case "Resource":
+		if strings.Contains(msg, "全拿") || strings.Contains(msg, "拾取") || strings.Contains(msg, "拿") {
+			return "grab_all", "根据表述推荐快速拾取", true
+		}
+		if strings.Contains(msg, "检查") || strings.Contains(msg, "小心") {
+			return "careful_check", "根据表述推荐仔细检查", true
+		}
+		if strings.Contains(msg, "交易") || strings.Contains(msg, "买") {
+			return "trade", "根据表述推荐交易", true
+		}
+		if strings.Contains(msg, "标记") {
+			return "mark_location", "根据表述推荐标记", true
+		}
+	}
+	return "", "", false
+}
+
+func fallbackIntent(roomType string, message string) (service, actionKey, reasoning string) {
+	if actionKey, reasoning, ok := tryKeywordOverride(roomType, message); ok {
+		return roomType, actionKey, "（意图解析不可用，" + reasoning + "）"
+	}
+	switch roomType {
+	case "Combat":
+		return "Combat", "strong_attack", "（意图解析不可用，使用默认：强攻）"
+	case "Event":
+		return "Event", "investigate", "（意图解析不可用，使用默认：调查）"
+	case "Resource":
+		return "Resource", "careful_check", "（意图解析不可用，使用默认：仔细检查）"
+	case "PathChoice":
+		return "PathChoice", "0", "（意图解析不可用，使用默认：路径0）"
+	default:
+		return roomType, "", "（未知房间类型，未选择行为）"
+	}
+}
+
+// callDoubao 调用豆包聊天 API（OpenAI 兼容格式），用于意图分类。
+func callDoubao(ctx context.Context, prompt string, timeout time.Duration) (string, error) {
+	apiKey := os.Getenv("DOUBAO_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("DOUBAO_API_KEY not set")
+	}
+	model := getDoubaoChatModel()
+	body := map[string]interface{}{
+		"model": model,
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": prompt},
+		},
+		"temperature": 0.3,
+		"max_tokens":  500,
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, doubaoChatURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("doubao api: %s", resp.Status)
+	}
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("doubao: empty response")
+	}
+	return result.Choices[0].Message.Content, nil
+}
+
+// DoubaoHealthCheck 发一条最小聊天请求，检测豆包链路是否可用。
+func DoubaoHealthCheck(apiKey string) (ok bool, latencyMs int64, errMsg string) {
+	start := time.Now()
+	timeout := getDoubaoTimeout()
+	if timeout > 25*time.Second {
+		timeout = 25 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	text, err := callDoubao(ctx, "Reply with exactly: ok", timeout)
+	latencyMs = time.Since(start).Milliseconds()
+	if err != nil {
+		return false, latencyMs, err.Error()
+	}
+	if text == "" {
+		return false, latencyMs, "empty response"
+	}
+	return true, latencyMs, ""
+}
+
+var markdownJSONBlock = regexp.MustCompile("(?s)\\s*```(?:json)?\\s*\\n?(.*?)\\n?\\s*```\\s*")
+
+func parseIntentResponse(text string) (service, actionKey, reasoning string, err error) {
+	text = strings.TrimSpace(text)
+	if m := markdownJSONBlock.FindStringSubmatch(text); len(m) >= 2 {
+		text = strings.TrimSpace(m[1])
+	}
+	var out struct {
+		Service   string `json:"service"`
+		ActionKey string `json:"action_key"`
+		Reasoning string `json:"reasoning"`
+	}
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		return "", "", "", err
+	}
+	return out.Service, out.ActionKey, out.Reasoning, nil
+}
+
+// Route 注册 WebSocket 与健康检查等路由。
+func Route(wsHandler *Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", wsHandler.ServeWS)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/health/doubao", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_, _ = w.Write([]byte(`{"ok":false,"error":"method not allowed"}`))
+			return
+		}
+		apiKey := os.Getenv("DOUBAO_API_KEY")
+		if apiKey == "" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"ok":false,"error":"DOUBAO_API_KEY not set"}`))
+			return
+		}
+		ok, latencyMs, errMsg := DoubaoHealthCheck(apiKey)
+		if ok {
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"ok":true,"latency_ms":%d}`, latencyMs)))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"ok":false,"error":%q,"latency_ms":%d}`, errMsg, latencyMs)))
+	})
+	return mux
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\gateway\ws_handler.go
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"go-server/internal/memory"
+	"go-server/internal/protocol"
+	"go-server/internal/repository"
+	riftofog "go-server/pkg/protocol"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+)
+
+const (
+	wsReadDeadline  = 5 * time.Minute  // 单条消息最长等待时间，超时则断开，避免客户端不发包导致 goroutine 永久阻塞
+	wsWriteDeadline = 15 * time.Second // 单次写响应超时
+)
+
+const maxRecentDecisions = 10
+
+// 与常见客户端（含 Unity/.NET ClientWebSocket）兼容：仅做协议升级，不限制 Origin
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+// Handler 处理 WebSocket 连接，与 Unity 通信并落库。通过 gRPC 调用 Combat/Event/Resource 微服务。
+type Handler struct {
+	Redis    *repository.Repository
+	Combat   riftofog.CombatServiceClient
+	Event    riftofog.EventServiceClient
+	Resource riftofog.ResourceServiceClient
+}
+
+// ServeWS 将 HTTP 升级为 WebSocket，按完整流程处理每条 UnityRequest。
+// 并发说明：每个连接仅此 goroutine 读写 conn，顺序为 读 -> 处理 -> 写，无锁、无并发读写同一 conn。
+func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
+	// 兼容部分客户端（如 Unity/.NET）发送的 Sec-WebSocket-Version 非 13 或格式不同：
+	// gorilla/websocket 只认 13，先统一成 13 再升级，避免 "unsupported version: 13 not found"。
+	if v := r.Header.Get("Sec-WebSocket-Version"); v != "13" {
+		r.Header.Set("Sec-WebSocket-Version", "13")
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[ws] upgrade: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	sessionID := uuid.New().String()
+	log.Printf("[ws] client connected session=%s (Unity 已连上)", sessionID[:8])
+	ctx := context.Background()
+
+	for {
+		conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("[ws] read: %v", err)
+			}
+			break
+		}
+		log.Printf("[ws] >>> received %d bytes", len(raw))
+
+		var req UnityRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			log.Printf("[ws] unmarshal request: %v", err)
+			conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
+			_ = conn.WriteJSON(ServerResponse{Type: "action_result", Result: "请求格式错误"})
+			continue
+		}
+
+		if req.Message != "" {
+			log.Printf("[ws] request session=%s room=%s message=%q", sessionID[:8], req.RoomType, req.Message)
+		} else {
+			log.Printf("[ws] request session=%s room=%s action=%s", sessionID[:8], req.RoomType, req.ActionKey)
+		}
+
+		resp := h.handleRequest(ctx, sessionID, &req)
+
+		if resp.Type == "llm_suggestion" {
+			log.Printf("[ws] response type=llm_suggestion action=%s suggestion=%q", resp.Action, resp.Suggestion)
+		} else {
+			log.Printf("[ws] response type=action_result service=%s action=%s result=%q", resp.Service, resp.Action, resp.Result)
+		}
+
+		// Redis：交换记录 + 会话缓存（SaveExchange 内已写 session:{id}）
+		if h.Redis != nil {
+			if err := h.Redis.SaveExchange(ctx, sessionID, &req, resp); err != nil {
+				log.Printf("[ws] redis save: %v", err)
+			} else {
+				log.Printf("[ws] redis saved session=%s (list rift:ws:exchanges + key session:%s)", sessionID[:8], sessionID[:8])
+			}
+		}
+
+		conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
+		if err := conn.WriteJSON(resp); err != nil {
+			log.Printf("[ws] write: %v", err)
+			break
+		}
+
+		// 异步写入 Qdrant：本次决策（不阻塞返回）；使用原始 req.RoomType 作为 room_type，避免 LLM 分类错误导致记录混乱
+		if resp.Service == "Combat" || resp.Service == "Event" || resp.Service == "Resource" {
+			scene := buildScene(&req)
+			roomTypeForSave := req.RoomType
+			go func(sid, sc, act, res, rt string) {
+				if err := memory.SaveDecision(sid, sc, act, res, rt); err != nil {
+					log.Printf("[ws] qdrant save_decision err: %v", err)
+				} else {
+					log.Printf("[ws] qdrant save_decision ok session=%s room=%s action=%s", sid[:8], rt, act)
+				}
+			}(sessionID, scene, req.ActionKey, resp.Result, roomTypeForSave)
+		}
+	}
+}
+
+func truncMsg(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+// buildScene 用 room_type + 属性 + recent_decisions 拼成用于检索的 scene 文本。
+func buildScene(req *UnityRequest) string {
+	part := fmt.Sprintf("room_type:%s hp:%d ap:%d str:%d int:%d lck:%d stealth:%d status:%s current_goal:%s",
+		req.RoomType, req.Hp, req.Ap, req.Str, req.IntVal, req.Lck, req.Stealth, req.Status, req.CurrentGoal)
+	if len(req.RecentDecisions) > 0 {
+		part += " recent_decisions:" + strings.Join(req.RecentDecisions, " | ")
+	}
+	if len(req.PathHints) > 0 {
+		part += " path_hints:" + strings.Join(req.PathHints, " | ")
+	}
+	if len(req.FuturePaths) > 0 {
+		part += " future_paths:" + strings.Join(req.FuturePaths, " | ")
+	}
+	return part
+}
+
+// handleRequest 完整流程：玩家风格 → Qdrant 检索 → 意图路由 → 微服务执行 → 组装 ServerResponse。
+func (h *Handler) handleRequest(ctx context.Context, sessionID string, req *UnityRequest) *ServerResponse {
+	isNaturalLang := req.Message != ""
+	log.Printf("[ws] handleRequest start natural_lang=%v room=%s message=%q", isNaturalLang, req.RoomType, truncMsg(req.Message, 60))
+
+	// 0) 获取玩家风格并追加到上下文，供 LLM 参考
+	if style := memory.GetPlayerStyle(sessionID); style != "" {
+		req.RecentDecisions = append(req.RecentDecisions, "玩家风格:"+style)
+	}
+
+	// 1) 用 scene 检索历史相似决策，追加到 RecentDecisions（限制条数）
+	scene := buildScene(req)
+	log.Printf("[ws] step1 SearchSimilar start (scene len=%d)", len(scene))
+	similar := memory.SearchSimilar(scene)
+	log.Printf("[ws] step1 SearchSimilar done len=%d", len(similar))
+	if len(similar) > 0 {
+		log.Printf("[ws] qdrant search_similar returned %d decisions", len(similar))
+	}
+	seen := make(map[string]bool)
+	for _, s := range req.RecentDecisions {
+		seen[s] = true
+	}
+	for _, s := range similar {
+		if !seen[s] {
+			seen[s] = true
+			req.RecentDecisions = append(req.RecentDecisions, s)
+		}
+	}
+	if len(req.RecentDecisions) > maxRecentDecisions {
+		req.RecentDecisions = req.RecentDecisions[len(req.RecentDecisions)-maxRecentDecisions:]
+	}
+
+	// 2) 自然语言时做意图分类，得到 action_key / reasoning。一律先返回 llm_suggestion，让客户端显示「听从建议/忽略」，不直接执行
+	var aiReasoning string
+	if req.Message != "" {
+		log.Printf("[ws] step2 RouteIntent start")
+		_, actionKey, reasoning, _ := RouteIntent(ctx, req)
+		log.Printf("[ws] step2 RouteIntent done actionKey=%q reasoning=%q", actionKey, truncMsg(reasoning, 80))
+		req.ActionKey = actionKey
+		aiReasoning = reasoning
+		if actionKey == "" {
+			log.Printf("[ws] handleRequest done type=llm_suggestion (no action), sending to client")
+			return &ServerResponse{
+				SessionID:   req.SessionID,
+				Type:        "llm_suggestion",
+				Service:     req.RoomType,
+				AIReasoning: aiReasoning,
+				Suggestion:  aiReasoning,
+			}
+		}
+		// 有推荐动作时也先返回建议，由用户选择「听从建议」或「忽略」，不直接执行、不关房
+		log.Printf("[ws] handleRequest done type=llm_suggestion, sending to client so user can choose")
+		return &ServerResponse{
+			SessionID:   req.SessionID,
+			Type:        "llm_suggestion",
+			Service:     req.RoomType,
+			Action:      actionKey,
+			AIReasoning: aiReasoning,
+			Suggestion:  aiReasoning,
+		}
+	}
+
+	// 3) 按 req.RoomType（Unity 原始房间类型）通过 gRPC 调对应微服务（Combat / Event / Resource）
+	protoReq := &riftofog.ActionRequest{
+		ActionKey:   req.ActionKey,
+		Str:         int32(req.Str),
+		IntVal:      int32(req.IntVal),
+		Lck:         int32(req.Lck),
+		Stealth:     int32(req.Stealth),
+		Hp:          int32(req.Hp),
+		Ap:          int32(req.Ap),
+		Status:      req.Status,
+		EnemyType:   req.EnemyType,
+		RoomContent: req.RoomContent,
+	}
+
+	var protoResp *riftofog.ActionResult
+	log.Printf("[ws] step3 gRPC ExecuteAction start room=%s action=%s", req.RoomType, req.ActionKey)
+	switch req.RoomType {
+	case "Combat":
+		if h.Combat == nil {
+			return &ServerResponse{Type: "action_result", Result: "Combat 服务不可用", Service: req.RoomType, Action: req.ActionKey}
+		}
+		protoResp, _ = h.Combat.ExecuteAction(ctx, protoReq)
+	case "Event":
+		if h.Event == nil {
+			return &ServerResponse{Type: "action_result", Result: "Event 服务不可用", Service: req.RoomType, Action: req.ActionKey}
+		}
+		protoResp, _ = h.Event.ExecuteAction(ctx, protoReq)
+	case "Resource":
+		if h.Resource == nil {
+			return &ServerResponse{Type: "action_result", Result: "Resource 服务不可用", Service: req.RoomType, Action: req.ActionKey}
+		}
+		protoResp, _ = h.Resource.ExecuteAction(ctx, protoReq)
+	default:
+		log.Printf("[ws] step3 gRPC done (PathChoice/other, no gRPC)")
+		// PathChoice 或其它：当前仅返回 LLM 的 reasoning + 路径提示占位；后续需补充：基于 Qdrant 历史 + path_hints 的 LLM 路径建议
+		suggestion := "（路径选择）房间:" + req.RoomType
+		if len(req.PathHints) > 0 {
+			suggestion += " 路径提示:" + strings.Join(req.PathHints, " | ")
+		}
+		if req.ActionKey != "" {
+			suggestion += " 推荐选择:" + req.ActionKey
+		}
+		if aiReasoning != "" {
+			suggestion += " — " + aiReasoning
+		}
+		return &ServerResponse{
+			SessionID:   req.SessionID,
+			Type:        "llm_suggestion",
+			Service:     req.RoomType,
+			Action:      req.ActionKey,
+			Result:      "",
+			AIReasoning: aiReasoning,
+			Suggestion:  suggestion,
+		}
+	}
+
+	// 4) 将 gRPC ActionResult + routing 的 reasoning 组合成 ServerResponse
+	var state *protocol.StateChanges
+	if protoResp != nil && (protoResp.GetHpDelta() != 0 || protoResp.GetApDelta() != 0 || protoResp.GetNewStatus() != "" || protoResp.GetClearStatus() != "") {
+		state = &protocol.StateChanges{
+			HpDelta:     protoResp.GetHpDelta(),
+			ApDelta:     protoResp.GetApDelta(),
+			NewStatus:   protoResp.GetNewStatus(),
+			ClearStatus: protoResp.GetClearStatus(),
+		}
+	}
+	resultText := ""
+	if protoResp != nil {
+		resultText = protoResp.GetResultText()
+	}
+	log.Printf("[ws] step3 gRPC done result=%s", truncMsg(resultText, 60))
+	log.Printf("[ws] handleRequest done type=action_result, sending to client")
+	return &ServerResponse{
+		SessionID:    req.SessionID,
+		Type:         "action_result",
+		Service:      req.RoomType,
+		Action:       req.ActionKey,
+		Result:       resultText,
+		StateChanges: state,
+		AIReasoning:  aiReasoning,
+		Suggestion:   resultText,
+	}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\memory\rag_client.go
+package memory
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+)
+
+const (
+	ragBaseURL   = "http://localhost:8001"
+	ragTimeout   = 10 * time.Second
+)
+
+// SaveDecision 调用 Python memory-rag 的 POST /save_decision，失败返回 error。
+func SaveDecision(sessionID, scene, action, result, roomType string) error {
+	body := map[string]string{
+		"session_id": sessionID,
+		"scene":      scene,
+		"action":     action,
+		"result":     result,
+		"room_type":  roomType,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, ragBaseURL+"/save_decision", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: ragTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("save_decision: %s", resp.Status)
+	}
+	return nil
+}
+
+// SearchSimilar 调用 Python memory-rag 的 POST /search_similar，返回相似决策描述列表；失败时返回 nil 不报错。
+func SearchSimilar(scene string) []string {
+	log.Printf("[rag] SearchSimilar start url=%s/search_similar", ragBaseURL)
+	body := map[string]interface{}{
+		"scene": scene,
+		"top_k": 5,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		log.Printf("[rag] SearchSimilar marshal err=%v", err)
+		return nil
+	}
+	req, err := http.NewRequest(http.MethodPost, ragBaseURL+"/search_similar", bytes.NewReader(raw))
+	if err != nil {
+		log.Printf("[rag] SearchSimilar newrequest err=%v", err)
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: ragTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[rag] SearchSimilar do err=%v (memory-rag 未启动或超时?)", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[rag] SearchSimilar status=%s", resp.Status)
+		return nil
+	}
+	var out struct {
+		Decisions []string `json:"decisions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		log.Printf("[rag] SearchSimilar decode err=%v", err)
+		return nil
+	}
+	log.Printf("[rag] SearchSimilar done len=%d", len(out.Decisions))
+	return out.Decisions
+}
+
+// GetPlayerStyle 调用 Python memory-rag 的 POST /get_player_style，返回该 session 的玩家风格描述；失败返回空字符串。
+func GetPlayerStyle(sessionID string) string {
+	body := map[string]string{"session_id": sessionID}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return ""
+	}
+	req, err := http.NewRequest(http.MethodPost, ragBaseURL+"/get_player_style", bytes.NewReader(raw))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: ragTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var out struct {
+		Style string `json:"style"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ""
+	}
+	return out.Style
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\pool\grpc_pool.go
+package pool
+
+import (
+	"sync/atomic"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+)
+
+// Pool 维护固定数量的 gRPC 连接，通过轮询方式对外提供 ClientConnInterface。
+type Pool struct {
+	conns []*grpc.ClientConn
+	next  uint32
+	size  int
+}
+
+// NewPool 创建连接池：向 addr 建立 size 个 gRPC 连接。任一连接失败则关闭已建立的连接并返回错误。
+func NewPool(addr string, size int) (*Pool, error) {
+	if size <= 0 {
+		size = 1
+	}
+	conns := make([]*grpc.ClientConn, 0, size)
+	for i := 0; i < size; i++ {
+		cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			for _, c := range conns {
+				_ = c.Close()
+			}
+			return nil, err
+		}
+		conns = append(conns, cc)
+	}
+	return &Pool{conns: conns, size: size}, nil
+}
+
+// Get 轮询返回池中的一个连接，实现 grpc.ClientConnInterface，可供生成 gRPC 客户端使用。
+func (p *Pool) Get() grpc.ClientConnInterface {
+	if p == nil || len(p.conns) == 0 {
+		return nil
+	}
+	n := atomic.AddUint32(&p.next, 1)
+	return p.conns[int(n-1)%p.size]
+}
+
+// Close 关闭池中所有连接。
+func (p *Pool) Close() {
+	if p == nil {
+		return
+	}
+	for _, c := range p.conns {
+		_ = c.Close()
+	}
+	p.conns = nil
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\protocol\protocol.go
+package protocol
+
+// ActionRequest 行为请求，与 game.proto 一致。
+type ActionRequest struct {
+	ActionKey   string `json:"action_key"`
+	Str         int32  `json:"str"`
+	IntVal      int32  `json:"int_val"`
+	Lck         int32  `json:"lck"`
+	Stealth     int32  `json:"stealth"`
+	Hp          int32  `json:"hp"`
+	Ap          int32  `json:"ap"`
+	Status      string `json:"status"`
+	EnemyType   string `json:"enemy_type"`
+	RoomContent string `json:"room_content"`
+}
+
+// ActionResult 行为结果，与 game.proto 一致。HP/AP 变化由调用方按「不低于 0」截断后填入。
+type ActionResult struct {
+	Success     bool   `json:"success"`
+	ResultText  string `json:"result_text"`
+	HpDelta     int32  `json:"hp_delta"`
+	ApDelta     int32  `json:"ap_delta"`
+	NewStatus   string `json:"new_status"`
+	ClearStatus string `json:"clear_status"`
+	Reward      string `json:"reward"`
+}
+
+// ClampDeltas 保证 (hp+hpDelta) 与 (ap+apDelta) 不低于 0，返回截断后的 delta。
+func ClampDeltas(hp, ap int32, hpDelta, apDelta int32) (clampedHp, clampedAp int32) {
+	if hp+hpDelta < 0 {
+		hpDelta = -hp
+	}
+	if ap+apDelta < 0 {
+		apDelta = -ap
+	}
+	return hpDelta, apDelta
+}
+
+// FatigueThreshold 当 AP<=0 且为消耗 AP 的行为时，阈值加 3。
+func FatigueThreshold(base int, ap int32, consumesAP bool) int {
+	if consumesAP && ap <= 0 {
+		return base + 3
+	}
+	return base
+}
+
+// StateChanges 状态变化，Unity 收到后更新 PlayerStats。
+type StateChanges struct {
+	HpDelta     int32  `json:"hp_delta"`
+	ApDelta     int32  `json:"ap_delta"`
+	NewStatus   string `json:"new_status"`
+	ClearStatus string `json:"clear_status"`
+}
+
+// UnityRequest 与 Unity 端发送的 JSON 一一对应。字段名统一下划线，与 game.proto 风格一致。
+type UnityRequest struct {
+	RoomType         string   `json:"room_type"`
+	NodeX            int      `json:"node_x"`
+	NodeY            int      `json:"node_y"`
+	PathHints        []string `json:"path_hints,omitempty"`
+	FuturePaths      []string `json:"future_paths,omitempty"` // 从当前节点出发后续 2～3 层房间类型序列，如 ["Combat→Resource→PathChoice"]
+	Hp               int      `json:"hp"`
+	Ap               int      `json:"ap"`
+	Str              int      `json:"str"`
+	IntVal           int      `json:"int_val"`
+	Lck              int      `json:"lck"`
+	Stealth          int      `json:"stealth"`
+	Status           string   `json:"status"`
+	CurrentGoal      string   `json:"current_goal"`
+	RecentDecisions  []string `json:"recent_decisions,omitempty"`
+	Message          string   `json:"message,omitempty"`
+	ActionKey        string   `json:"action_key,omitempty"`
+	SessionID        string   `json:"session_id"`
+	Type             string   `json:"type"`
+	AvailableActions []string `json:"available_actions,omitempty"`
+	EnemyType        string   `json:"enemy_type,omitempty"`   // 仅 Combat：patrol/guard/swarm
+	RoomContent      string   `json:"room_content,omitempty"` // 仅 Event/Resource：npc/device/inscription、chest_*/merchant/spring
+}
+
+// ServerResponse 与服务端返回给 Unity 的 JSON 一一对应。
+type ServerResponse struct {
+	SessionID    string         `json:"session_id"`
+	Type         string         `json:"type"`
+	Service      string         `json:"service"`
+	Action       string         `json:"action"`
+	Result       string         `json:"result"`
+	AIReasoning  string         `json:"ai_reasoning"`
+	Suggestion   string         `json:"suggestion"`
+	StateChanges *StateChanges  `json:"state_changes,omitempty"`
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\repository\redis.go
+package repository
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"go-server/internal/protocol"
+
+	"github.com/redis/go-redis/v9"
+)
+
+const (
+	exchangeListKey   = "rift:ws:exchanges"
+	maxListLen        = 10000
+	sessionKeyPrefix  = "session:"
+	sessionExpireSec  = 24 * 60 * 60 // 24h
+)
+
+// Repository 用于将 Unity 与网关的通信内容写入 Redis。
+type Repository struct {
+	cli *redis.Client
+}
+
+// New 创建 Redis 仓库。addr 例 "localhost:6379"，password 可为空。
+func New(addr, password string, db int) (*Repository, error) {
+	cli := redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Password: password,
+		DB:       db,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := cli.Ping(ctx).Err(); err != nil {
+		return nil, fmt.Errorf("redis ping: %w", err)
+	}
+	return &Repository{cli: cli}, nil
+}
+
+// Exchange 单次通信记录（请求+响应），便于序列化存入 Redis。
+type Exchange struct {
+	At       time.Time               `json:"at"`
+	Request  *protocol.UnityRequest   `json:"request"`
+	Response *protocol.ServerResponse `json:"response"`
+	Session  string                  `json:"session,omitempty"`
+}
+
+// SessionCache 会话摘要，缓存到 session:{session_id}，过期 24h。
+type SessionCache struct {
+	SessionID string    `json:"session_id"`
+	RoomType  string    `json:"room_type"`
+	Action    string    `json:"action"`
+	Result    string    `json:"result"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// SaveExchange 将一次 Unity 请求与服务器响应写入 Redis（列表尾部），便于审计与后续分析。
+func (r *Repository) SaveExchange(ctx context.Context, session string, req *protocol.UnityRequest, resp *protocol.ServerResponse) error {
+	if req == nil {
+		req = &protocol.UnityRequest{}
+	}
+	if resp == nil {
+		resp = &protocol.ServerResponse{}
+	}
+	ex := Exchange{
+		At:       time.Now().UTC(),
+		Request:  req,
+		Response: resp,
+		Session:  session,
+	}
+	raw, err := json.Marshal(ex)
+	if err != nil {
+		return fmt.Errorf("marshal exchange: %w", err)
+	}
+	pipe := r.cli.Pipeline()
+	pipe.RPush(ctx, exchangeListKey, raw)
+	pipe.LTrim(ctx, exchangeListKey, -maxListLen, -1)
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return err
+	}
+
+	// 将会话数据缓存到 session:{session_id}，过期 24 小时
+	resultText := ""
+	if resp.Result != "" {
+		resultText = resp.Result
+	}
+	cache := SessionCache{
+		SessionID: session,
+		RoomType:  req.RoomType,
+		Action:    req.ActionKey,
+		Result:    resultText,
+		UpdatedAt: time.Now().UTC(),
+	}
+	cacheRaw, _ := json.Marshal(cache)
+	key := sessionKeyPrefix + session
+	_ = r.cli.Set(ctx, key, cacheRaw, sessionExpireSec*time.Second)
+	return nil
+}
+
+// Close 关闭 Redis 连接。
+func (r *Repository) Close() error {
+	return r.cli.Close()
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\services\combat.go
+package services
+
+import (
+	"math/rand"
+	"strings"
+
+	"go-server/internal/protocol"
+)
+
+// hasStatus 判断 status 字符串中是否包含某状态（如 "中毒"、"燃烧"、"减速"）。
+func hasStatus(status, s string) bool {
+	return strings.Contains(status, s)
+}
+
+// ExecuteAction 实现 Combat 房间行为规则。
+func ExecuteCombatAction(req *protocol.ActionRequest) *protocol.ActionResult {
+	if req == nil {
+		return &protocol.ActionResult{Success: false, ResultText: "无效请求"}
+	}
+	out := &protocol.ActionResult{}
+
+	switch req.ActionKey {
+	case "strong_attack":
+		out = combatStrongAttack(req)
+	case "lure":
+		out = combatLure(req)
+	case "stealth_pass":
+		out = combatStealthPass(req)
+	case "negotiate":
+		out = combatNegotiate(req)
+	default:
+		out.Success = false
+		out.ResultText = "未知行为: " + req.ActionKey
+		return out
+	}
+
+	// 通用：HP/AP 不低于 0 截断
+	out.HpDelta, out.ApDelta = protocol.ClampDeltas(req.Hp, req.Ap, out.HpDelta, out.ApDelta)
+	return out
+}
+
+func combatStrongAttack(req *protocol.ActionRequest) *protocol.ActionResult {
+	str := req.Str
+	if hasStatus(req.Status, "中毒") {
+		str -= 3
+	}
+	thresholdSuccess := protocol.FatigueThreshold(15, req.Ap, true)
+	thresholdPartial := protocol.FatigueThreshold(10, req.Ap, true)
+	if req.EnemyType == "guard" {
+		thresholdSuccess += 3
+		thresholdPartial += 3
+	}
+	hpDelta := int32(0)
+	apDelta := int32(-1)
+	if str >= int32(thresholdSuccess) {
+		hpDelta = -5
+		apDelta = -1
+		return &protocol.ActionResult{Success: true, ResultText: "一击制敌，势如破竹", HpDelta: hpDelta, ApDelta: apDelta}
+	}
+	if str >= int32(thresholdPartial) {
+		// 达标但未满：约 70% 部分成功，30% 仍判失败，增加随机性
+		if rand.Float32() < 0.7 {
+			hpDelta = -15
+			apDelta = -2
+			out := &protocol.ActionResult{Success: true, ResultText: "击败敌人，但受了不轻的伤", HpDelta: hpDelta, ApDelta: apDelta}
+			if req.EnemyType == "swarm" {
+				out.HpDelta -= 10
+			}
+			return out
+		}
+		// 随机判为失败，走下方失败分支
+	}
+	hpDelta = -25
+	apDelta = -2
+	out := &protocol.ActionResult{Success: false, ResultText: "力量不足，被敌人反击重创", HpDelta: hpDelta, ApDelta: apDelta}
+	if req.EnemyType == "swarm" {
+		out.HpDelta -= 10
+	}
+	return out
+}
+
+func combatLure(req *protocol.ActionRequest) *protocol.ActionResult {
+	if hasStatus(req.Status, "燃烧") {
+		return &protocol.ActionResult{Success: false, ResultText: "你正在燃烧，无法保持冷静引诱"}
+	}
+	th14 := int32(protocol.FatigueThreshold(14, req.Ap, true))
+	th10 := int32(protocol.FatigueThreshold(10, req.Ap, true))
+	intVal := req.IntVal
+	if intVal >= th14 {
+		return &protocol.ActionResult{Success: true, ResultText: "成功将敌人分散，逐一击破", HpDelta: -3, ApDelta: -2}
+	}
+	if intVal >= th10 {
+		if rand.Float32() < 0.7 {
+			return &protocol.ActionResult{Success: true, ResultText: "部分引诱成功，仍受到一些伤害", HpDelta: -12, ApDelta: -3}
+		}
+		return &protocol.ActionResult{Success: false, ResultText: "引诱失败，敌人一拥而上", HpDelta: -20, ApDelta: -2}
+	}
+	return &protocol.ActionResult{Success: false, ResultText: "引诱失败，敌人一拥而上", HpDelta: -20, ApDelta: -2}
+}
+
+func combatStealthPass(req *protocol.ActionRequest) *protocol.ActionResult {
+	stealth := req.Stealth
+	if hasStatus(req.Status, "减速") {
+		stealth -= 4
+	}
+	th14 := int32(protocol.FatigueThreshold(14, req.Ap, true))
+	th10 := int32(protocol.FatigueThreshold(10, req.Ap, true))
+	if stealth >= th14 {
+		return &protocol.ActionResult{Success: true, ResultText: "悄无声息地绕过，敌人毫无察觉", HpDelta: 0, ApDelta: -1}
+	}
+	if stealth >= th10 {
+		if rand.Float32() < 0.7 {
+			return &protocol.ActionResult{Success: true, ResultText: "勉强绕过，但惊动了一只敌人", HpDelta: -8, ApDelta: -2}
+		}
+		return &protocol.ActionResult{Success: false, ResultText: "被发现！遭到突袭", HpDelta: -20, ApDelta: -2}
+	}
+	return &protocol.ActionResult{Success: false, ResultText: "被发现！遭到突袭", HpDelta: -20, ApDelta: -2}
+}
+
+func combatNegotiate(req *protocol.ActionRequest) *protocol.ActionResult {
+	th14 := int32(protocol.FatigueThreshold(14, req.Ap, true))
+	th10 := int32(protocol.FatigueThreshold(10, req.Ap, true))
+	lck := req.Lck
+	if lck >= th14 {
+		return &protocol.ActionResult{Success: true, ResultText: "谈判成功，消耗体力但安全撤退", HpDelta: 0, ApDelta: -3}
+	}
+	if lck >= th10 {
+		if rand.Float32() < 0.7 {
+			return &protocol.ActionResult{Success: true, ResultText: "勉强谈成，付出了一些代价", HpDelta: -10, ApDelta: -2}
+		}
+		return &protocol.ActionResult{Success: false, ResultText: "谈判破裂，被迫仓皇撤退", HpDelta: -15, ApDelta: -1}
+	}
+	return &protocol.ActionResult{Success: false, ResultText: "谈判破裂，被迫仓皇撤退", HpDelta: -15, ApDelta: -1}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\services\event.go
+package services
+
+import (
+	"math/rand"
+	"strings"
+
+	"go-server/internal/protocol"
+)
+
+// ExecuteEventAction 实现 Event 房间行为规则。room_content 为 npc / device / inscription 之一。
+func ExecuteEventAction(req *protocol.ActionRequest) *protocol.ActionResult {
+	if req == nil {
+		return &protocol.ActionResult{Success: false, ResultText: "无效请求"}
+	}
+	out := &protocol.ActionResult{}
+
+	switch req.ActionKey {
+	case "investigate":
+		out = eventInvestigate(req)
+	case "destroy":
+		out = eventDestroy(req)
+	case "ignore":
+		out = eventIgnore(req)
+	case "gamble":
+		out = eventGamble(req)
+	default:
+		out.Success = false
+		out.ResultText = "未知行为: " + req.ActionKey
+		return out
+	}
+
+	out.HpDelta, out.ApDelta = protocol.ClampDeltas(req.Hp, req.Ap, out.HpDelta, out.ApDelta)
+	return out
+}
+
+func eventInvestigate(req *protocol.ActionRequest) *protocol.ActionResult {
+	// INT 检定；device 失败时 new_status="中毒"；消耗 AP 时疲劳阈值+3
+	th14 := int32(protocol.FatigueThreshold(14, req.Ap, true))
+	th10 := int32(protocol.FatigueThreshold(10, req.Ap, true))
+	intVal := req.IntVal
+	if intVal >= th14 {
+		return &protocol.ActionResult{Success: true, ResultText: "深入调查，发现了关键线索", ApDelta: -2, Reward: "隐藏信息"}
+	}
+	if intVal >= th10 {
+		if rand.Float32() < 0.7 {
+			return &protocol.ActionResult{Success: true, ResultText: "有所发现，但信息不完整", ApDelta: -2, Reward: "普通信息"}
+		}
+	}
+	out := &protocol.ActionResult{Success: false, ResultText: "调查失败，触发了机关", ApDelta: -2, HpDelta: -5}
+	if strings.Contains(req.RoomContent, "device") {
+		out.NewStatus = "中毒"
+	}
+	return out
+}
+
+func eventDestroy(req *protocol.ActionRequest) *protocol.ActionResult {
+	str := req.Str
+	if str >= 14 {
+		return &protocol.ActionResult{Success: true, ResultText: "强行破坏，获得大量资源但受了伤", Reward: "资源x2", HpDelta: -5}
+	}
+	if str >= 10 {
+		if rand.Float32() < 0.7 {
+			return &protocol.ActionResult{Success: true, ResultText: "破坏成功，代价不小", Reward: "资源x1", HpDelta: -10}
+		}
+	}
+	out := &protocol.ActionResult{Success: false, ResultText: "破坏失败，触发爆炸", HpDelta: -20}
+	if strings.Contains(req.RoomContent, "device") {
+		out.NewStatus = "燃烧"
+	}
+	return out
+}
+
+func eventIgnore(req *protocol.ActionRequest) *protocol.ActionResult {
+	return &protocol.ActionResult{Success: true, ResultText: "选择无视，继续前进，错过了潜在收益", HpDelta: 0, ApDelta: 0}
+}
+
+func eventGamble(req *protocol.ActionRequest) *protocol.ActionResult {
+	lck := req.Lck
+	if lck >= 15 {
+		return &protocol.ActionResult{Success: true, ResultText: "神明眷顾！获得了珍贵的奖励", Reward: "稀有物品", HpDelta: 20}
+	}
+	if lck >= 10 {
+		if rand.Float32() < 0.7 {
+			return &protocol.ActionResult{Success: true, ResultText: "运气不错，小有收获", Reward: "普通物品", HpDelta: 5}
+		}
+	}
+	return &protocol.ActionResult{Success: false, ResultText: "运气太差，遭受了严重惩罚", HpDelta: -30, NewStatus: "中毒"}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\internal\services\resource.go
+package services
+
+import (
+	"math/rand"
+	"strings"
+
+	"go-server/internal/protocol"
+)
+
+// ExecuteResourceAction 实现 Resource 房间行为规则。
+// room_content: chest_normal / chest_rare / chest_cursed / merchant / spring
+func ExecuteResourceAction(req *protocol.ActionRequest) *protocol.ActionResult {
+	if req == nil {
+		return &protocol.ActionResult{Success: false, ResultText: "无效请求"}
+	}
+	out := &protocol.ActionResult{}
+
+	switch req.ActionKey {
+	case "grab_all":
+		out = resourceGrabAll(req)
+	case "careful_check":
+		out = resourceCarefulCheck(req)
+	case "trade":
+		out = resourceTrade(req)
+	case "mark_location":
+		out = resourceMarkLocation(req)
+	default:
+		out.Success = false
+		out.ResultText = "未知行为: " + req.ActionKey
+		return out
+	}
+
+	out.HpDelta, out.ApDelta = protocol.ClampDeltas(req.Hp, req.Ap, out.HpDelta, out.ApDelta)
+	return out
+}
+
+func resourceGrabAll(req *protocol.ActionRequest) *protocol.ActionResult {
+	room := req.RoomContent
+	if strings.Contains(room, "chest_cursed") {
+		return &protocol.ActionResult{Success: false, ResultText: "诅咒宝箱！中毒了", HpDelta: -20, NewStatus: "中毒"}
+	}
+	if strings.Contains(room, "chest_rare") {
+		return &protocol.ActionResult{Success: true, ResultText: "快速拾取，触发了轻微陷阱", Reward: "稀有物品x2", HpDelta: -5}
+	}
+	return &protocol.ActionResult{Success: true, ResultText: "迅速拾取全部物品", Reward: "普通物品x2"}
+}
+
+func resourceCarefulCheck(req *protocol.ActionRequest) *protocol.ActionResult {
+	if req.Ap < 2 {
+		return &protocol.ActionResult{Success: false, ResultText: "行动点不足，无法仔细检查"}
+	}
+	room := req.RoomContent
+	th12 := int32(protocol.FatigueThreshold(12, req.Ap, true))
+	intVal := req.IntVal
+	if strings.Contains(room, "chest_cursed") && intVal >= th12 {
+		return &protocol.ActionResult{Success: true, ResultText: "发现并解除了诅咒", ApDelta: -2, Reward: "解除诅咒+物品"}
+	}
+	if strings.Contains(room, "chest_rare") {
+		return &protocol.ActionResult{Success: true, ResultText: "仔细检查发现更多", ApDelta: -2, Reward: "稀有物品x3"}
+	}
+	if strings.Contains(room, "spring") {
+		return &protocol.ActionResult{Success: true, ResultText: "泉水效果翻倍", ApDelta: -1, HpDelta: 30}
+	}
+	return &protocol.ActionResult{Success: true, ResultText: "安全获取物品", ApDelta: -2, Reward: "普通物品x1"}
+}
+
+func resourceTrade(req *protocol.ActionRequest) *protocol.ActionResult {
+	if !strings.Contains(req.RoomContent, "merchant") {
+		return &protocol.ActionResult{Success: false, ResultText: "这里没有商人"}
+	}
+	th14 := int32(protocol.FatigueThreshold(14, req.Ap, true))
+	th10 := int32(protocol.FatigueThreshold(10, req.Ap, true))
+	intVal := req.IntVal
+	if intVal >= th14 {
+		return &protocol.ActionResult{Success: true, ResultText: "谈判高手，以极优惠的价格成交", Reward: "以低价获得稀有物品", ApDelta: -1}
+	}
+	if intVal >= th10 {
+		if rand.Float32() < 0.7 {
+			return &protocol.ActionResult{Success: true, ResultText: "正常交易完成", Reward: "正常价格获得物品", ApDelta: -1}
+		}
+	}
+	return &protocol.ActionResult{Success: false, ResultText: "被商人坑了一笔", HpDelta: -5}
+}
+
+func resourceMarkLocation(req *protocol.ActionRequest) *protocol.ActionResult {
+	// 永远成功，无消耗；服务端可在此触发 Qdrant 存储。
+	return &protocol.ActionResult{Success: true, ResultText: "在此留下标记，AI将记住这个地点", Reward: "标记已记录", HpDelta: 0, ApDelta: 0}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\memory-rag\main.py
+"""
+FastAPI HTTP 接口，供 Go 服务端调用向量存取。
+监听 localhost:8001
+"""
+import os
+from dotenv import load_dotenv
+# 当前目录 + 上级目录（go-server 根），便于在 memory-rag 下运行时读到根目录 .env
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from vectordb import (
+    save_decision as vdb_save_decision,
+    search_similar as vdb_search_similar,
+    update_player_style as vdb_update_player_style,
+    get_player_style as vdb_get_player_style,
+)
+
+
+class SaveDecisionBody(BaseModel):
+    session_id: str
+    scene: str
+    action: str
+    result: str
+    room_type: str
+
+
+class SearchSimilarBody(BaseModel):
+    scene: str
+    top_k: int = 5
+
+
+class SearchSimilarResponse(BaseModel):
+    decisions: list[str]
+
+
+class GetPlayerStyleBody(BaseModel):
+    session_id: str
+
+
+class GetPlayerStyleResponse(BaseModel):
+    style: str
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    key = (os.environ.get("DOUBAO_API_KEY") or "").strip()
+    if not key:
+        print("Warning: DOUBAO_API_KEY not set, embedding/save_decision will fail. Set it in go-server/.env.")
+    else:
+        print("[memory-rag] DOUBAO_API_KEY loaded (chat + embedding use Ark/豆包官方).")
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post("/save_decision")
+async def save_decision_endpoint(body: SaveDecisionBody):
+    try:
+        vdb_save_decision(
+            session_id=body.session_id,
+            scene=body.scene,
+            action=body.action,
+            result=body.result,
+            room_type=body.room_type,
+        )
+        try:
+            vdb_update_player_style(
+                session_id=body.session_id,
+                action=body.action,
+                result=body.result,
+                room_type=body.room_type,
+            )
+        except Exception as ex:
+            print(f"[memory-rag] update_player_style err: {ex}")
+        print(f"[memory-rag] save_decision ok session={body.session_id[:8]} room={body.room_type} action={body.action}")
+        return {"ok": True}
+    except Exception as e:
+        print(f"[memory-rag] save_decision err: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/search_similar")
+async def search_similar_endpoint(body: SearchSimilarBody) -> SearchSimilarResponse:
+    try:
+        decisions = vdb_search_similar(scene=body.scene, top_k=body.top_k)
+        print(f"[memory-rag] search_similar ok top_k={body.top_k} returned={len(decisions)}")
+        return SearchSimilarResponse(decisions=decisions)
+    except Exception as e:
+        print(f"[memory-rag] search_similar err: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/get_player_style")
+async def get_player_style_endpoint(body: GetPlayerStyleBody) -> GetPlayerStyleResponse:
+    try:
+        style = vdb_get_player_style(session_id=body.session_id)
+        return GetPlayerStyleResponse(style=style or "")
+    except Exception as e:
+        print(f"[memory-rag] get_player_style err: {e}")
+        return GetPlayerStyleResponse(style="")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8001)
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\memory-rag\reset_collections.py
+"""
+删除 Qdrant 中的旧集合，解决「维度冲突」导致的写入失败。
+
+当 embedding 模型从 Gemini(768 维) 换为豆包(2048 维) 时，已有集合的维度不可改，
+必须删掉旧集合，让 vectordb 在下次写入时按 VECTOR_SIZE 重新创建。
+
+用法（在 memory-rag 目录下）:
+  python reset_collections.py
+
+或用 curl:
+  curl -X DELETE http://localhost:6333/collections/rift_decisions
+  curl -X DELETE http://localhost:6333/collections/player_styles
+"""
+from qdrant_client import QdrantClient
+
+# 与 vectordb.py 保持一致，避免导入 vectordb（不需要 DOUBAO_API_KEY）
+COLLECTION_NAME = "rift_decisions"
+PLAYER_STYLES_COLLECTION = "player_styles"
+QDRANT_HOST = "localhost"
+QDRANT_PORT = 6333
+
+def main():
+    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    for name in [COLLECTION_NAME, PLAYER_STYLES_COLLECTION]:
+        try:
+            client.delete_collection(name)
+            print(f"已删除集合: {name}")
+        except Exception as e:
+            # 集合不存在时可能抛错，视客户端版本而定
+            print(f"删除 {name} 时: {e}")
+    print("完成。下次 save_decision / search_similar 时会自动创建新集合。")
+
+if __name__ == "__main__":
+    main()
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\memory-rag\test.py
+import os
+from dotenv import load_dotenv
+load_dotenv("../.env")
+
+from volcenginesdkarkruntime import Ark
+
+api_key = os.environ.get("DOUBAO_API_KEY")
+print("key:", api_key[:8] if api_key else "None")
+
+client = Ark(api_key=api_key)
+resp = client.multimodal_embeddings.create(
+    model="ep-20260305105321-5lb48",
+    input=[
+        {"type": "text", "text": "测试文本"}
+    ]
+)
+print(resp.data.embedding)
+print("维度:", len(resp.data.embedding))
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\memory-rag\test1.py
+from qdrant_client import QdrantClient
+
+client = QdrantClient(
+    host="0.0.0.0",
+    port=6333,
+    prefer_grpc=False,
+    check_compatibility=False
+)
+print(client.get_collections())
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\memory-rag\test3.py
+import os
+import sys
+
+# 确保能读到 .env
+from dotenv import load_dotenv
+load_dotenv("../.env")  # 读取上级目录的 .env
+load_dotenv()           # 读取同级目录的 .env (如果有)
+
+# 导入你的业务逻辑
+try:
+    from vectordb import search_similar, _embed, save_decision
+except ImportError as e:
+    print(f"❌ 导入失败: {e}")
+    print("请确保你在 go-server/memory-rag/ 目录下运行此脚本")
+    sys.exit(1)
+
+def test_embedding():
+    print("\n--- 1. 测试 Embedding (豆包) ---")
+    text = "测试文本"
+    try:
+        vector = _embed(text)
+        print(f"✅ Embedding 成功! 向量维度: {len(vector)}")
+        if len(vector) != 2048:
+            print("⚠️ 警告: 维度不是 2048，请检查 Qdrant 集合配置是否匹配！")
+        return True
+    except Exception as e:
+        print(f"❌ Embedding 失败: {e}")
+        print("💡 提示: 请检查 VPN 是否已关闭，以及 DOUBAO_API_KEY 是否正确")
+        return False
+
+def test_save_and_search():
+    print("\n--- 2. 测试 写入 & 检索 (Qdrant) ---")
+    
+    # 1. 先写入一条假数据，确保库里有东西
+    session_id = "test_session_001"
+    scene = "在一个黑暗的洞穴里，发现了一个发光的宝箱"
+    action = "careful_check"
+    result = "发现宝箱里有解毒剂"
+    room = "Resource"
+    
+    print(f"正在写入测试数据: {action}...")
+    try:
+        save_decision(session_id, scene, action, result, room)
+        print("✅ 写入成功")
+    except Exception as e:
+        print(f"❌ 写入失败: {e}")
+        return
+
+    # 2. 尝试检索
+    print(f"正在检索相似场景: '{scene}'...")
+    try:
+        results = search_similar(scene, top_k=3)
+        print(f"✅ 检索成功! 找到了 {len(results)} 条结果:")
+        for i, res in enumerate(results):
+            print(f"  [{i+1}] {res}")
+            
+        if len(results) == 0:
+            print("⚠️ 检索返回为空。可能原因：")
+            print("  1. 写入的数据还没持久化（Qdrant通常是实时的，这很少见）")
+            print("  2. search_similar 里的查询逻辑有 Bug")
+            print("  3. 集合名称对不上")
+            
+    except Exception as e:
+        print(f"❌ 检索报错: {e}")
+        print("💡 提示: 这通常是 vectordb.py 里 search/query_points 写法的问题")
+
+if __name__ == "__main__":
+    # 检查环境变量
+    if not os.environ.get("DOUBAO_API_KEY"):
+        print("❌ 错误: 未找到 DOUBAO_API_KEY，请检查 .env 文件")
+        sys.exit(1)
+        
+    if test_embedding():
+        test_save_and_search()
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\memory-rag\vectordb.py
+"""
+Qdrant 向量存取，向量化使用豆包官方 Ark multimodal_embeddings（与 test.py 一致，DOUBAO_API_KEY）。
+玩家风格统计存 collection player_styles，key 为 session_id。
+"""
+import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    load_dotenv()
+except ImportError:
+    pass
+import time
+import uuid
+from typing import Optional
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from volcenginesdkarkruntime import Ark
+
+COLLECTION_NAME = "rift_decisions"
+PLAYER_STYLES_COLLECTION = "player_styles"
+VECTOR_SIZE = 2048
+# player_styles 用零向量即可，只存 payload
+STYLE_VECTOR_SIZE = 8
+QDRANT_HOST = "localhost"
+QDRANT_PORT = 6333
+DOUBAO_EMBED_MODEL = "ep-20260305105321-5lb48"
+
+_ark_client = None
+_qdrant = None
+
+
+def _get_ark_client():
+    global _ark_client
+    if _ark_client is None:
+        api_key = (os.environ.get("DOUBAO_API_KEY") or "").strip()
+        if not api_key:
+            raise ValueError("DOUBAO_API_KEY not set (见 go-server/.env)")
+        _ark_client = Ark(api_key=api_key)
+    return _ark_client
+
+
+def _get_qdrant():
+    global _qdrant
+    if _qdrant is None:
+        _qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    return _qdrant
+
+
+def _get_existing_vector_size(client, collection_name: str) -> Optional[int]:
+    """获取已存在集合的向量维度，若无法获取则返回 None。"""
+    try:
+        info = client.get_collection(collection_name)
+        vparams = info.config.params.vectors
+        if hasattr(vparams, "size"):
+            return int(vparams.size)
+        if hasattr(vparams, "values"):
+            for p in vparams.values():
+                if hasattr(p, "size"):
+                    return int(p.size)
+                break
+        return None
+    except Exception:
+        return None
+
+
+def _ensure_collection():
+    client = _get_qdrant()
+    collections = client.get_collections().collections
+    names = [c.name for c in collections]
+    if COLLECTION_NAME not in names:
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+        )
+        return client
+    # 已存在集合：检查维度是否与当前 VECTOR_SIZE 一致，避免 768 vs 2048 等维度冲突
+    existing = _get_existing_vector_size(client, COLLECTION_NAME)
+    if existing is not None and existing != VECTOR_SIZE:
+        raise ValueError(
+            f"集合 {COLLECTION_NAME} 当前维度为 {existing}，与当前配置 VECTOR_SIZE={VECTOR_SIZE} 不一致。"
+            "请删除旧集合后重试：在 memory-rag 目录运行 python reset_collections.py ，或执行 "
+            "curl -X DELETE http://localhost:6333/collections/rift_decisions"
+        )
+    return client
+
+
+def _embed(text: str) -> list[float]:
+    """与 test.py 一致：使用 Ark SDK multimodal_embeddings.create，维度 2048。"""
+    client = _get_ark_client()
+    resp = client.multimodal_embeddings.create(
+        model=DOUBAO_EMBED_MODEL,
+        input=[{"type": "text", "text": text}],
+    )
+    return resp.data.embedding
+
+
+def save_decision(session_id: str, scene: str, action: str, result: str, room_type: str) -> None:
+    """将一次决策写入 Qdrant。scene+action+result 拼成文本后向量化，collection 不存在时自动创建。"""
+    text = f"{scene}\n{action}\n{result}"
+    vector = _embed(text)
+    client = _ensure_collection()
+    payload = {
+        "session_id": session_id,
+        "scene": scene,
+        "action": action,
+        "result": result,
+        "room_type": room_type,
+        "timestamp": time.time(),
+    }
+    point = PointStruct(
+        id=str(uuid.uuid4()),
+        vector=vector,
+        payload=payload,
+    )
+    try:
+        client.upsert(collection_name=COLLECTION_NAME, points=[point])
+    except Exception as e:
+        msg = str(e)
+        hint = ""
+        if "dimension" in msg.lower() or "wrong vector" in msg.lower() or len(vector) != VECTOR_SIZE:
+            hint = (
+                " 若为维度冲突，请删除旧集合：在 memory-rag 目录运行 python reset_collections.py"
+            )
+        raise Exception(f"upsert failed: {e}, vector_len={len(vector)}.{hint}")
+
+
+def search_similar(scene: str, top_k: int = 5) -> list[str]:
+    """按 scene 向量检索最相似的 top_k 条决策，返回可读描述列表。"""
+    try:
+        query_vector = _embed(scene)
+    except Exception:
+        return []
+    client = _ensure_collection()
+    # 兼容 qdrant-client 新旧 API：旧版用 .search()，新版用 .query_points() 且返回带 .points
+    try:
+        hits = client.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_vector,
+            limit=top_k,
+        )
+    except AttributeError:
+        res = client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_vector,
+            limit=top_k,
+        )
+        hits = res.points if hasattr(res, "points") else res
+    out = []
+    for h in hits:
+        p = getattr(h, "payload", None) or {}
+        room = p.get("room_type", "")
+        action = p.get("action", "")
+        result = p.get("result", "")
+        out.append(f"在{room}房间选了{action}，结果：{result}")
+    return out
+
+
+def _style_point_id(session_id: str):
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, "player_style_" + session_id))
+
+
+def _ensure_player_styles_collection():
+    client = _get_qdrant()
+    names = [c.name for c in client.get_collections().collections]
+    if PLAYER_STYLES_COLLECTION not in names:
+        client.create_collection(
+            collection_name=PLAYER_STYLES_COLLECTION,
+            vectors_config=VectorParams(size=STYLE_VECTOR_SIZE, distance=Distance.COSINE),
+        )
+    return client
+
+
+def update_player_style(session_id: str, action: str, result: str, room_type: str) -> None:
+    """按 session 统计决策偏好：各房间类型下各 action 次数、成功率，写入 player_styles。"""
+    client = _ensure_player_styles_collection()
+    point_id = _style_point_id(session_id)
+    # 判定是否“成功”：result 里不含明显失败词则计为成功
+    success = 1 if result and "失败" not in result and "受伤" not in result and "失去" not in result else 0
+    key_room_action = f"{room_type}:{action}"
+    try:
+        pts = client.retrieve(collection_name=PLAYER_STYLES_COLLECTION, ids=[point_id])
+    except Exception:
+        pts = []
+    if pts:
+        p = pts[0].payload or {}
+        room_actions = dict(p.get("room_actions") or {})
+        room_actions[key_room_action] = room_actions.get(key_room_action, 0) + 1
+        successes = p.get("successes", 0) + success
+        total = p.get("total", 0) + 1
+    else:
+        room_actions = {key_room_action: 1}
+        successes = success
+        total = 1
+    payload = {
+        "session_id": session_id,
+        "room_actions": room_actions,
+        "successes": successes,
+        "total": total,
+        "last_updated": time.time(),
+    }
+    vector = [0.0] * STYLE_VECTOR_SIZE
+    point = PointStruct(id=point_id, vector=vector, payload=payload)
+    client.upsert(collection_name=PLAYER_STYLES_COLLECTION, points=[point])
+
+
+def get_player_style(session_id: str) -> str:
+    """返回该 session 的玩家风格描述，供 LLM 参考。"""
+    try:
+        client = _ensure_player_styles_collection()
+        point_id = _style_point_id(session_id)
+        pts = client.retrieve(collection_name=PLAYER_STYLES_COLLECTION, ids=[point_id])
+    except Exception:
+        return ""
+    if not pts:
+        return ""
+    p = pts[0].payload or {}
+    room_actions = p.get("room_actions") or {}
+    successes = p.get("successes", 0)
+    total = p.get("total", 0)
+    success_rate = f"{int(100 * successes / total)}%" if total else "0%"
+    # 按房间类型聚合：Combat 里哪种 action 最多等
+    by_room = {}
+    for k, cnt in room_actions.items():
+        if ":" in k:
+            room, action = k.split(":", 1)
+            by_room.setdefault(room, []).append((action, cnt))
+    parts = [f"该玩家总决策{total}次，成功率{success_rate}"]
+    for room, pairs in sorted(by_room.items()):
+        pairs.sort(key=lambda x: -x[1])
+        top = pairs[0]
+        pct = int(100 * top[1] / sum(c for _, c in pairs)) if pairs else 0
+        parts.append(f"{room}房间偏好{top[0]}({pct}%)")
+    return "；".join(parts)
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\pkg\protocol\game.pb.go
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// versions:
+// 	protoc-gen-go v1.36.6
+// 	protoc        v6.31.0--rc2
+// source: api/proto/riftofog/game.proto
+
+package riftofog
+
+import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
+)
+
+const (
+	// Verify that this generated code is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(20 - protoimpl.MinVersion)
+	// Verify that runtime/protoimpl is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
+)
+
+// 行为请求：网关或 gRPC 调用 Combat/Event/Resource 时传入。
+type ActionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActionKey     string                 `protobuf:"bytes,1,opt,name=action_key,json=actionKey,proto3" json:"action_key,omitempty"` // 行为 key
+	Str           int32                  `protobuf:"varint,2,opt,name=str,proto3" json:"str,omitempty"`
+	IntVal        int32                  `protobuf:"varint,3,opt,name=int_val,json=intVal,proto3" json:"int_val,omitempty"`
+	Lck           int32                  `protobuf:"varint,4,opt,name=lck,proto3" json:"lck,omitempty"`
+	Stealth       int32                  `protobuf:"varint,5,opt,name=stealth,proto3" json:"stealth,omitempty"`
+	Hp            int32                  `protobuf:"varint,6,opt,name=hp,proto3" json:"hp,omitempty"`
+	Ap            int32                  `protobuf:"varint,7,opt,name=ap,proto3" json:"ap,omitempty"`
+	Status        string                 `protobuf:"bytes,8,opt,name=status,proto3" json:"status,omitempty"`                               // 当前状态，如"中毒 燃烧"
+	EnemyType     string                 `protobuf:"bytes,9,opt,name=enemy_type,json=enemyType,proto3" json:"enemy_type,omitempty"`        // 仅 Combat 用：patrol/guard/swarm
+	RoomContent   string                 `protobuf:"bytes,10,opt,name=room_content,json=roomContent,proto3" json:"room_content,omitempty"` // 仅 Event/Resource 用
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ActionRequest) Reset() {
+	*x = ActionRequest{}
+	mi := &file_api_proto_riftofog_game_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActionRequest) ProtoMessage() {}
+
+func (x *ActionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_riftofog_game_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActionRequest.ProtoReflect.Descriptor instead.
+func (*ActionRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_riftofog_game_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *ActionRequest) GetActionKey() string {
+	if x != nil {
+		return x.ActionKey
+	}
+	return ""
+}
+
+func (x *ActionRequest) GetStr() int32 {
+	if x != nil {
+		return x.Str
+	}
+	return 0
+}
+
+func (x *ActionRequest) GetIntVal() int32 {
+	if x != nil {
+		return x.IntVal
+	}
+	return 0
+}
+
+func (x *ActionRequest) GetLck() int32 {
+	if x != nil {
+		return x.Lck
+	}
+	return 0
+}
+
+func (x *ActionRequest) GetStealth() int32 {
+	if x != nil {
+		return x.Stealth
+	}
+	return 0
+}
+
+func (x *ActionRequest) GetHp() int32 {
+	if x != nil {
+		return x.Hp
+	}
+	return 0
+}
+
+func (x *ActionRequest) GetAp() int32 {
+	if x != nil {
+		return x.Ap
+	}
+	return 0
+}
+
+func (x *ActionRequest) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ActionRequest) GetEnemyType() string {
+	if x != nil {
+		return x.EnemyType
+	}
+	return ""
+}
+
+func (x *ActionRequest) GetRoomContent() string {
+	if x != nil {
+		return x.RoomContent
+	}
+	return ""
+}
+
+// 行为结果：HP/AP 变化已在服务端按「不低于 0」截断。
+type ActionResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ResultText    string                 `protobuf:"bytes,2,opt,name=result_text,json=resultText,proto3" json:"result_text,omitempty"` // 展示给玩家的描述
+	HpDelta       int32                  `protobuf:"varint,3,opt,name=hp_delta,json=hpDelta,proto3" json:"hp_delta,omitempty"`
+	ApDelta       int32                  `protobuf:"varint,4,opt,name=ap_delta,json=apDelta,proto3" json:"ap_delta,omitempty"`
+	NewStatus     string                 `protobuf:"bytes,5,opt,name=new_status,json=newStatus,proto3" json:"new_status,omitempty"`       // 新增状态
+	ClearStatus   string                 `protobuf:"bytes,6,opt,name=clear_status,json=clearStatus,proto3" json:"clear_status,omitempty"` // 清除状态
+	Reward        string                 `protobuf:"bytes,7,opt,name=reward,proto3" json:"reward,omitempty"`                              // 获得的物品/信息
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ActionResult) Reset() {
+	*x = ActionResult{}
+	mi := &file_api_proto_riftofog_game_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActionResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActionResult) ProtoMessage() {}
+
+func (x *ActionResult) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_riftofog_game_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActionResult.ProtoReflect.Descriptor instead.
+func (*ActionResult) Descriptor() ([]byte, []int) {
+	return file_api_proto_riftofog_game_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ActionResult) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *ActionResult) GetResultText() string {
+	if x != nil {
+		return x.ResultText
+	}
+	return ""
+}
+
+func (x *ActionResult) GetHpDelta() int32 {
+	if x != nil {
+		return x.HpDelta
+	}
+	return 0
+}
+
+func (x *ActionResult) GetApDelta() int32 {
+	if x != nil {
+		return x.ApDelta
+	}
+	return 0
+}
+
+func (x *ActionResult) GetNewStatus() string {
+	if x != nil {
+		return x.NewStatus
+	}
+	return ""
+}
+
+func (x *ActionResult) GetClearStatus() string {
+	if x != nil {
+		return x.ClearStatus
+	}
+	return ""
+}
+
+func (x *ActionResult) GetReward() string {
+	if x != nil {
+		return x.Reward
+	}
+	return ""
+}
+
+var File_api_proto_riftofog_game_proto protoreflect.FileDescriptor
+
+const file_api_proto_riftofog_game_proto_rawDesc = "" +
+	"\n" +
+	"\x1dapi/proto/riftofog/game.proto\x12\briftofog\"\xff\x01\n" +
+	"\rActionRequest\x12\x1d\n" +
+	"\n" +
+	"action_key\x18\x01 \x01(\tR\tactionKey\x12\x10\n" +
+	"\x03str\x18\x02 \x01(\x05R\x03str\x12\x17\n" +
+	"\aint_val\x18\x03 \x01(\x05R\x06intVal\x12\x10\n" +
+	"\x03lck\x18\x04 \x01(\x05R\x03lck\x12\x18\n" +
+	"\astealth\x18\x05 \x01(\x05R\astealth\x12\x0e\n" +
+	"\x02hp\x18\x06 \x01(\x05R\x02hp\x12\x0e\n" +
+	"\x02ap\x18\a \x01(\x05R\x02ap\x12\x16\n" +
+	"\x06status\x18\b \x01(\tR\x06status\x12\x1d\n" +
+	"\n" +
+	"enemy_type\x18\t \x01(\tR\tenemyType\x12!\n" +
+	"\froom_content\x18\n" +
+	" \x01(\tR\vroomContent\"\xd9\x01\n" +
+	"\fActionResult\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x1f\n" +
+	"\vresult_text\x18\x02 \x01(\tR\n" +
+	"resultText\x12\x19\n" +
+	"\bhp_delta\x18\x03 \x01(\x05R\ahpDelta\x12\x19\n" +
+	"\bap_delta\x18\x04 \x01(\x05R\aapDelta\x12\x1d\n" +
+	"\n" +
+	"new_status\x18\x05 \x01(\tR\tnewStatus\x12!\n" +
+	"\fclear_status\x18\x06 \x01(\tR\vclearStatus\x12\x16\n" +
+	"\x06reward\x18\a \x01(\tR\x06reward2Q\n" +
+	"\rCombatService\x12@\n" +
+	"\rExecuteAction\x12\x17.riftofog.ActionRequest\x1a\x16.riftofog.ActionResult2P\n" +
+	"\fEventService\x12@\n" +
+	"\rExecuteAction\x12\x17.riftofog.ActionRequest\x1a\x16.riftofog.ActionResult2S\n" +
+	"\x0fResourceService\x12@\n" +
+	"\rExecuteAction\x12\x17.riftofog.ActionRequest\x1a\x16.riftofog.ActionResultB'Z%go-server/api/proto/riftofog;riftofogb\x06proto3"
+
+var (
+	file_api_proto_riftofog_game_proto_rawDescOnce sync.Once
+	file_api_proto_riftofog_game_proto_rawDescData []byte
+)
+
+func file_api_proto_riftofog_game_proto_rawDescGZIP() []byte {
+	file_api_proto_riftofog_game_proto_rawDescOnce.Do(func() {
+		file_api_proto_riftofog_game_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_api_proto_riftofog_game_proto_rawDesc), len(file_api_proto_riftofog_game_proto_rawDesc)))
+	})
+	return file_api_proto_riftofog_game_proto_rawDescData
+}
+
+var file_api_proto_riftofog_game_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_api_proto_riftofog_game_proto_goTypes = []any{
+	(*ActionRequest)(nil), // 0: riftofog.ActionRequest
+	(*ActionResult)(nil),  // 1: riftofog.ActionResult
+}
+var file_api_proto_riftofog_game_proto_depIdxs = []int32{
+	0, // 0: riftofog.CombatService.ExecuteAction:input_type -> riftofog.ActionRequest
+	0, // 1: riftofog.EventService.ExecuteAction:input_type -> riftofog.ActionRequest
+	0, // 2: riftofog.ResourceService.ExecuteAction:input_type -> riftofog.ActionRequest
+	1, // 3: riftofog.CombatService.ExecuteAction:output_type -> riftofog.ActionResult
+	1, // 4: riftofog.EventService.ExecuteAction:output_type -> riftofog.ActionResult
+	1, // 5: riftofog.ResourceService.ExecuteAction:output_type -> riftofog.ActionResult
+	3, // [3:6] is the sub-list for method output_type
+	0, // [0:3] is the sub-list for method input_type
+	0, // [0:0] is the sub-list for extension type_name
+	0, // [0:0] is the sub-list for extension extendee
+	0, // [0:0] is the sub-list for field type_name
+}
+
+func init() { file_api_proto_riftofog_game_proto_init() }
+func file_api_proto_riftofog_game_proto_init() {
+	if File_api_proto_riftofog_game_proto != nil {
+		return
+	}
+	type x struct{}
+	out := protoimpl.TypeBuilder{
+		File: protoimpl.DescBuilder{
+			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_riftofog_game_proto_rawDesc), len(file_api_proto_riftofog_game_proto_rawDesc)),
+			NumEnums:      0,
+			NumMessages:   2,
+			NumExtensions: 0,
+			NumServices:   3,
+		},
+		GoTypes:           file_api_proto_riftofog_game_proto_goTypes,
+		DependencyIndexes: file_api_proto_riftofog_game_proto_depIdxs,
+		MessageInfos:      file_api_proto_riftofog_game_proto_msgTypes,
+	}.Build()
+	File_api_proto_riftofog_game_proto = out.File
+	file_api_proto_riftofog_game_proto_goTypes = nil
+	file_api_proto_riftofog_game_proto_depIdxs = nil
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\mvc+qdrant+ai\go-server\pkg\protocol\game_grpc.pb.go
+// Code generated by protoc-gen-go-grpc. DO NOT EDIT.
+// versions:
+// - protoc-gen-go-grpc v1.5.1
+// - protoc             v6.31.0--rc2
+// source: api/proto/riftofog/game.proto
+
+package riftofog
+
+import (
+	context "context"
+	grpc "google.golang.org/grpc"
+	codes "google.golang.org/grpc/codes"
+	status "google.golang.org/grpc/status"
+)
+
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the grpc package it is being compiled against.
+// Requires gRPC-Go v1.64.0 or later.
+const _ = grpc.SupportPackageIsVersion9
+
+const (
+	CombatService_ExecuteAction_FullMethodName = "/riftofog.CombatService/ExecuteAction"
+)
+
+// CombatServiceClient is the client API for CombatService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type CombatServiceClient interface {
+	ExecuteAction(ctx context.Context, in *ActionRequest, opts ...grpc.CallOption) (*ActionResult, error)
+}
+
+type combatServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewCombatServiceClient(cc grpc.ClientConnInterface) CombatServiceClient {
+	return &combatServiceClient{cc}
+}
+
+func (c *combatServiceClient) ExecuteAction(ctx context.Context, in *ActionRequest, opts ...grpc.CallOption) (*ActionResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ActionResult)
+	err := c.cc.Invoke(ctx, CombatService_ExecuteAction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CombatServiceServer is the server API for CombatService service.
+// All implementations must embed UnimplementedCombatServiceServer
+// for forward compatibility.
+type CombatServiceServer interface {
+	ExecuteAction(context.Context, *ActionRequest) (*ActionResult, error)
+	mustEmbedUnimplementedCombatServiceServer()
+}
+
+// UnimplementedCombatServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedCombatServiceServer struct{}
+
+func (UnimplementedCombatServiceServer) ExecuteAction(context.Context, *ActionRequest) (*ActionResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExecuteAction not implemented")
+}
+func (UnimplementedCombatServiceServer) mustEmbedUnimplementedCombatServiceServer() {}
+func (UnimplementedCombatServiceServer) testEmbeddedByValue()                       {}
+
+// UnsafeCombatServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to CombatServiceServer will
+// result in compilation errors.
+type UnsafeCombatServiceServer interface {
+	mustEmbedUnimplementedCombatServiceServer()
+}
+
+func RegisterCombatServiceServer(s grpc.ServiceRegistrar, srv CombatServiceServer) {
+	// If the following call pancis, it indicates UnimplementedCombatServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&CombatService_ServiceDesc, srv)
+}
+
+func _CombatService_ExecuteAction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CombatServiceServer).ExecuteAction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CombatService_ExecuteAction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CombatServiceServer).ExecuteAction(ctx, req.(*ActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// CombatService_ServiceDesc is the grpc.ServiceDesc for CombatService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var CombatService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "riftofog.CombatService",
+	HandlerType: (*CombatServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ExecuteAction",
+			Handler:    _CombatService_ExecuteAction_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "api/proto/riftofog/game.proto",
+}
+
+const (
+	EventService_ExecuteAction_FullMethodName = "/riftofog.EventService/ExecuteAction"
+)
+
+// EventServiceClient is the client API for EventService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type EventServiceClient interface {
+	ExecuteAction(ctx context.Context, in *ActionRequest, opts ...grpc.CallOption) (*ActionResult, error)
+}
+
+type eventServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewEventServiceClient(cc grpc.ClientConnInterface) EventServiceClient {
+	return &eventServiceClient{cc}
+}
+
+func (c *eventServiceClient) ExecuteAction(ctx context.Context, in *ActionRequest, opts ...grpc.CallOption) (*ActionResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ActionResult)
+	err := c.cc.Invoke(ctx, EventService_ExecuteAction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// EventServiceServer is the server API for EventService service.
+// All implementations must embed UnimplementedEventServiceServer
+// for forward compatibility.
+type EventServiceServer interface {
+	ExecuteAction(context.Context, *ActionRequest) (*ActionResult, error)
+	mustEmbedUnimplementedEventServiceServer()
+}
+
+// UnimplementedEventServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedEventServiceServer struct{}
+
+func (UnimplementedEventServiceServer) ExecuteAction(context.Context, *ActionRequest) (*ActionResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExecuteAction not implemented")
+}
+func (UnimplementedEventServiceServer) mustEmbedUnimplementedEventServiceServer() {}
+func (UnimplementedEventServiceServer) testEmbeddedByValue()                      {}
+
+// UnsafeEventServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to EventServiceServer will
+// result in compilation errors.
+type UnsafeEventServiceServer interface {
+	mustEmbedUnimplementedEventServiceServer()
+}
+
+func RegisterEventServiceServer(s grpc.ServiceRegistrar, srv EventServiceServer) {
+	// If the following call pancis, it indicates UnimplementedEventServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&EventService_ServiceDesc, srv)
+}
+
+func _EventService_ExecuteAction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EventServiceServer).ExecuteAction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EventService_ExecuteAction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EventServiceServer).ExecuteAction(ctx, req.(*ActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// EventService_ServiceDesc is the grpc.ServiceDesc for EventService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var EventService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "riftofog.EventService",
+	HandlerType: (*EventServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ExecuteAction",
+			Handler:    _EventService_ExecuteAction_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "api/proto/riftofog/game.proto",
+}
+
+const (
+	ResourceService_ExecuteAction_FullMethodName = "/riftofog.ResourceService/ExecuteAction"
+)
+
+// ResourceServiceClient is the client API for ResourceService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type ResourceServiceClient interface {
+	ExecuteAction(ctx context.Context, in *ActionRequest, opts ...grpc.CallOption) (*ActionResult, error)
+}
+
+type resourceServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewResourceServiceClient(cc grpc.ClientConnInterface) ResourceServiceClient {
+	return &resourceServiceClient{cc}
+}
+
+func (c *resourceServiceClient) ExecuteAction(ctx context.Context, in *ActionRequest, opts ...grpc.CallOption) (*ActionResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ActionResult)
+	err := c.cc.Invoke(ctx, ResourceService_ExecuteAction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ResourceServiceServer is the server API for ResourceService service.
+// All implementations must embed UnimplementedResourceServiceServer
+// for forward compatibility.
+type ResourceServiceServer interface {
+	ExecuteAction(context.Context, *ActionRequest) (*ActionResult, error)
+	mustEmbedUnimplementedResourceServiceServer()
+}
+
+// UnimplementedResourceServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedResourceServiceServer struct{}
+
+func (UnimplementedResourceServiceServer) ExecuteAction(context.Context, *ActionRequest) (*ActionResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExecuteAction not implemented")
+}
+func (UnimplementedResourceServiceServer) mustEmbedUnimplementedResourceServiceServer() {}
+func (UnimplementedResourceServiceServer) testEmbeddedByValue()                         {}
+
+// UnsafeResourceServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ResourceServiceServer will
+// result in compilation errors.
+type UnsafeResourceServiceServer interface {
+	mustEmbedUnimplementedResourceServiceServer()
+}
+
+func RegisterResourceServiceServer(s grpc.ServiceRegistrar, srv ResourceServiceServer) {
+	// If the following call pancis, it indicates UnimplementedResourceServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ResourceService_ServiceDesc, srv)
+}
+
+func _ResourceService_ExecuteAction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ResourceServiceServer).ExecuteAction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ResourceService_ExecuteAction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ResourceServiceServer).ExecuteAction(ctx, req.(*ActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ResourceService_ServiceDesc is the grpc.ServiceDesc for ResourceService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ResourceService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "riftofog.ResourceService",
+	HandlerType: (*ResourceServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ExecuteAction",
+			Handler:    _ResourceService_ExecuteAction_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "api/proto/riftofog/game.proto",
+}
+
+
+========================================
+

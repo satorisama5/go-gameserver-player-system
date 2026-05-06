@@ -1,0 +1,21 @@
+FROM golang:1.24.3
+
+WORKDIR /app
+
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+ENV GOPROXY=https://goproxy.cn,direct
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# 编译
+RUN go build -o gatewayd ./cmd/gatewayd
+
+# 暴露端口 (网关端口)
+EXPOSE 8080
+
+# 启动
+CMD ["./gatewayd"]

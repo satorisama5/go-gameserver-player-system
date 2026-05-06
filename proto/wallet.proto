@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package wallet;
+
+option go_package = "./proto";
+
+service WalletService {
+  // 查询钱包余额（不存在时自动按默认余额创建）
+  rpc GetWallet (GetWalletRequest) returns (GetWalletResponse);
+
+  // 购买商城固定物品 A（演示版）
+  rpc PurchaseItemA (PurchaseItemARequest) returns (PurchaseItemAResponse);
+
+  // 击杀奖励：session 仅调本 RPC；实现上先加币写 ledger，再调 Leaderboard SubmitScore（ZIncrBy）。详见 docs/go服务器后续扩展.md 第二点。
+  rpc GrantKillReward (GrantKillRewardRequest) returns (GrantKillRewardResponse);
+}
+
+message GetWalletRequest {
+  string user_key = 1;
+  string user_name = 2;
+}
+
+message GetWalletResponse {
+  bool success = 1;
+  int64 balance = 2;
+  string message = 3;
+}
+
+message PurchaseItemARequest {
+  string user_key = 1;
+  string user_name = 2;
+  string req_id = 3; // 幂等键：客户端重发同 req_id 只扣一次
+}
+
+message PurchaseItemAResponse {
+  bool success = 1;
+  int64 balance = 2;
+  string item_id = 3;
+  int64 cost = 4;
+  bool duplicate = 5; // true 表示命中幂等，返回首次结果
+  string message = 6;
+}
+
+// GrantKillRewardRequest 击杀奖励请求；req_id 与 (user_key, req_id) 账本唯一索引对齐，用于幂等。
+message GrantKillRewardRequest {
+  string user_key = 1;
+  string user_name = 2;
+  string req_id = 3;      // 幂等键
+  string kill_id = 4;     // 击杀事件ID（业务标识）
+  string monster_id = 5;  // 击杀怪物ID
+  int32 score_delta = 6;  // 奖励积分
+  int64 gold_reward = 7;  // 奖励金币
+}
+
+message GrantKillRewardResponse {
+  bool success = 1;
+  int64 balance = 2;
+  bool duplicate = 3;
+  string message = 4;
+}
+

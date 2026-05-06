@@ -1,0 +1,2969 @@
+// 内容来自: E:\unity project\unityserverupgrade\cmd\gamed\main.go
+// cmd/gamed/main.go (最终修正版，可直接替换)
+package main
+
+import (
+	"fmt"
+	"google.golang.org/grpc"
+	"log"
+	"net"
+	"unityserverupgrade/internal" // 导入 internal 包
+	"unityserverupgrade/proto"
+)
+
+// 这个函数现在只是一个简单的包装，调用 internal 包里的真正实现
+func StartServer() {
+	// 【修正】必须通过 internal 包名来调用
+	server := internal.NewServer("0.0.0.0", internal.Conf.Server.TcpPort)
+	server.Start()
+}
+
+func StartGrpcServer() {
+	addr := fmt.Sprintf("0.0.0.0:%d", internal.Conf.Server.GrpcPort)
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("gRPC failed to listen: %v", err)
+	}
+
+	s := grpc.NewServer()
+
+	proto.RegisterLeaderboardServiceServer(s, &internal.LeaderboardServer{})
+
+	fmt.Println("gRPC 服务器正在监听 :9090...")
+	if err := s.Serve(lis); err != nil {
+		log.Fatalf("gRPC failed to serve: %v", err)
+	}
+}
+
+func main() {
+	internal.InitConfig()
+	// 【核心修正】所有对 internal 包内容的调用，都必须加上 "internal." 前缀
+	internal.InitDB()
+	internal.InitRedis()
+	internal.InitMQ()
+	internal.RunChatLogConsumer()
+
+	internal.WordFilter = internal.NewFilterManager()
+	sensitiveWords := internal.LoadSensitiveWords()
+	internal.WordFilter.Build(sensitiveWords)
+	
+	go StartGrpcServer()
+
+	go StartServer()
+
+	//go internal.StartWebSocketProxy(8889, "127.0.0.1:8888")
+
+	fmt.Println("Go 服务端 (TCP + gRPC) 已启动")
+
+	select {}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\cmd\gatewayd\main.go
+package main
+
+import (
+	"context"
+	"log"
+	"net"
+	"os"
+
+	"github.com/mwitkow/grpc-proxy/proxy"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+)
+
+const (
+	gatewayPort = ":8080"
+)
+
+func main() {
+	grpcBackendHost := os.Getenv("GRPC_BACKEND_HOST")
+	if grpcBackendHost == "" {
+		grpcBackendHost = "127.0.0.1:9090"
+	}
+	lis, err := net.Listen("tcp", gatewayPort)
+	if err != nil {
+		log.Fatalf("网关监听失败: %v", err)
+
+	}
+
+	// 【修正1】使用新的 grpc.NewClient API，替换掉被弃用的 DialContext
+	backendConn, err := grpc.NewClient(
+		grpcBackendHost,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		log.Fatalf("无法连接到后端 gRPC 服务: %v", err)
+	}
+
+	// 【修正2】将 director 函数的返回类型精确匹配 StreamDirector 的要求
+	director := func(ctx context.Context, fullMethodName string) (context.Context, grpc.ClientConnInterface, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		outCtx := metadata.NewOutgoingContext(ctx, md.Copy())
+
+		// backendConn 是 *grpc.ClientConn 类型，它实现了 grpc.ClientConnInterface 接口，所以可以直接返回
+		return outCtx, backendConn, nil
+	}
+
+	// 创建 gRPC 服务器作为网关
+	// 【修正3】由于 director 的签名现在完全匹配，我们不再需要强制类型转换
+	server := grpc.NewServer(
+		grpc.UnknownServiceHandler(proxy.TransparentHandler(director)),
+	)
+
+	log.Printf("gRPC 透明代理网关正在启动，监听端口 %s...", gatewayPort)
+	log.Printf("  -> 所有 gRPC 流量将被转发到 %s", grpcBackendHost)
+
+	if err := server.Serve(lis); err != nil {
+		log.Fatalf("网关启动失败: %v", err)
+	}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\cmd\loadtest\main.go
+// 连接数压测小工具：按 [2 字节长度头 + JSON 体] 协议建 N 个长连接；支持仅心跳或真实行为模拟。
+// 使用：go run ./cmd/loadtest -addr 127.0.0.1:8888 -n 500 -interval 5s
+// 真实模式：go run ./cmd/loadtest -addr 127.0.0.1:8888 -mode real -n 500 -duration 60s
+package main
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"math/rand"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// 与 internal/message.go 保持一致
+const (
+	MSG_ID_COMMAND      = 1001
+	MSG_ID_HEARTBEAT    = 1002
+	MSG_ID_PLAYER_MOVE_REQ = 2002
+)
+
+type Message struct {
+	ID   int             `json:"id"`
+	Data json.RawMessage `json:"data"`
+}
+
+type CommandMessage struct {
+	Cmd string `json:"cmd"`
+}
+
+type PlayerPosition struct {
+	X float32 `json:"x"`
+	Y float32 `json:"y"`
+	Z float32 `json:"z"`
+}
+
+// packPacket 打包为 [2 字节大端长度 + JSON 体]
+func packPacket(msg Message) []byte {
+	body, _ := json.Marshal(msg)
+	p := make([]byte, 2+len(body))
+	binary.BigEndian.PutUint16(p[0:2], uint16(len(body)))
+	copy(p[2:], body)
+	return p
+}
+
+var (
+	statsTotalSent int64
+	statsTotalFail int64
+	statsStart     time.Time
+)
+
+func main() {
+	addr := flag.String("addr", "127.0.0.1:8888", "服务器地址，例如 127.0.0.1:8888")
+	n := flag.Int("n", 200, "要建立的连接数")
+	mode := flag.String("mode", "heartbeat", "heartbeat=仅心跳; real=模拟真实玩家(rename+移动+聊天+心跳)")
+	interval := flag.Duration("interval", 5*time.Second, "每条连接发送心跳的间隔，例如 5s、10s（仅 heartbeat 模式）")
+	duration := flag.Duration("duration", 0, "压测持续时间，0 表示只建连并打一次心跳后退出；>0 时持续。real 模式建议 -duration 60s")
+	ramp := flag.Duration("ramp", 0, "建连拉平时间：在此时长内均匀发起连接；0=不拉平。建议 -n 较大时用 -ramp 5s 或 -ramp 20s")
+	flag.Parse()
+
+	realMode := *mode == "real"
+	if realMode && *duration <= 0 {
+		*duration = 60 * time.Second
+	}
+
+	fmt.Printf("目标: %s, 连接数: %d, 模式: %s", *addr, *n, *mode)
+	if *ramp > 0 {
+		fmt.Printf(", 建连拉平: %v", *ramp)
+	}
+	if *duration > 0 {
+		fmt.Printf(", 持续: %v", *duration)
+	}
+	if !realMode {
+		fmt.Printf(", 心跳间隔: %v", *interval)
+	}
+	fmt.Println()
+	fmt.Println("---")
+
+	statsStart = time.Now()
+	var alive int32
+	var dialFail int32
+	var wg sync.WaitGroup
+
+	heartbeatPacket := packPacket(Message{ID: MSG_ID_HEARTBEAT, Data: json.RawMessage("null")})
+
+	rampStart := time.Now()
+	for i := 0; i < *n; i++ {
+		wg.Add(1)
+		if *ramp > 0 && *n > 1 {
+			target := time.Duration(int64(*ramp) * int64(i) / int64(*n-1))
+			if elapsed := time.Since(rampStart); target > elapsed {
+				time.Sleep(target - elapsed)
+			}
+		}
+		if realMode {
+			go runRealPlayer(*addr, i, *duration, &alive, &dialFail, &wg)
+		} else {
+			go runHeartbeat(*addr, i, heartbeatPacket, *interval, *duration, &alive, &dialFail, &wg)
+		}
+	}
+
+	wg.Wait()
+	elapsed := time.Since(statsStart)
+
+	fmt.Println("---")
+	fmt.Printf("请求连接数: %d\n", *n)
+	fmt.Printf("建连/写失败(含被拒): %d\n", dialFail)
+	fmt.Printf("当前存活连接数: %d\n", alive)
+	if realMode {
+		fmt.Printf("总发包数: %d\n", atomic.LoadInt64(&statsTotalSent))
+		fmt.Printf("发包失败数: %d\n", atomic.LoadInt64(&statsTotalFail))
+		if elapsed.Seconds() > 0 {
+			fmt.Printf("平均每秒发包量: %.1f\n", float64(atomic.LoadInt64(&statsTotalSent))/elapsed.Seconds())
+		}
+	}
+	if *duration > 0 {
+		fmt.Printf("说明: 上述「存活」为持续 %v 内未断开的连接数。\n", *duration)
+	} else if !realMode {
+		fmt.Println("说明: 若需观察「运行一段时间后还剩多少」，请加 -duration 如 -duration 60s。")
+	}
+}
+
+// runHeartbeat 原有仅心跳模式
+func runHeartbeat(addr string, id int, heartbeatPacket []byte, interval, duration time.Duration, alive, dialFail *int32, wg *sync.WaitGroup) {
+	defer wg.Done()
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		atomic.AddInt32(dialFail, 1)
+		if id < 5 || (id+1)%100 == 0 {
+			log.Printf("[%d] Dial 失败: %v", id, err)
+		}
+		return
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write(heartbeatPacket); err != nil {
+		atomic.AddInt32(dialFail, 1)
+		if id < 5 {
+			log.Printf("[%d] 首次写入失败: %v", id, err)
+		}
+		return
+	}
+	atomic.AddInt32(alive, 1)
+
+	go drainConn(conn)
+
+	if duration <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	end := time.Now().Add(duration)
+	writeDeadline := 10 * time.Second
+	for time.Now().Before(end) {
+		<-ticker.C
+		_ = conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+		if _, err := conn.Write(heartbeatPacket); err != nil {
+			atomic.AddInt32(alive, -1)
+			if id < 3 {
+				log.Printf("[%d] 心跳写入失败: %v", id, err)
+			}
+			return
+		}
+	}
+}
+
+// runRealPlayer 真实行为模拟：rename -> 每 100ms 移动、每 3s 聊天、每 5s 心跳
+func runRealPlayer(addr string, id int, duration time.Duration, alive, dialFail *int32, wg *sync.WaitGroup) {
+	defer wg.Done()
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		atomic.AddInt32(dialFail, 1)
+		if id < 5 || (id+1)%100 == 0 {
+			log.Printf("[%d] Dial 失败: %v", id, err)
+		}
+		return
+	}
+	defer conn.Close()
+
+	writeDeadline := 10 * time.Second
+	send := func(p []byte) bool {
+		_ = conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+		_, err := conn.Write(p)
+		if err != nil {
+			atomic.AddInt64(&statsTotalFail, 1)
+			return false
+		}
+		atomic.AddInt64(&statsTotalSent, 1)
+		return true
+	}
+
+	// 1. 先发 rename：cmd=rename|Bot_<id>|loadtest_<id>
+	renameCmd, _ := json.Marshal(CommandMessage{Cmd: fmt.Sprintf("rename|Bot_%d|loadtest_%d", id, id)})
+	renamePkt := packPacket(Message{ID: MSG_ID_COMMAND, Data: renameCmd})
+	if !send(renamePkt) {
+		atomic.AddInt32(dialFail, 1)
+		if id < 5 {
+			log.Printf("[%d] rename 发送失败", id)
+		}
+		return
+	}
+	atomic.AddInt32(alive, 1)
+
+	go drainConn(conn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	defer cancel()
+
+	moveTicker := time.NewTicker(100 * time.Millisecond)
+	chatTicker := time.NewTicker(3 * time.Second)
+	heartbeatTicker := time.NewTicker(5 * time.Second)
+	defer moveTicker.Stop()
+	defer chatTicker.Stop()
+	defer heartbeatTicker.Stop()
+
+	// 随机移动：在 -200~200 范围内小步移动，避免服务端移速校验踢掉
+	rng := rand.New(rand.NewSource(int64(id) + time.Now().UnixNano()))
+	pos := PlayerPosition{X: float32(rng.Intn(400) - 200), Y: 99, Z: float32(rng.Intn(400) - 200)}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-moveTicker.C:
+			pos.X += float32(rng.Intn(31)-15) * 0.1
+			pos.Z += float32(rng.Intn(31)-15) * 0.1
+			data, _ := json.Marshal(pos)
+			pkt := packPacket(Message{ID: MSG_ID_PLAYER_MOVE_REQ, Data: data})
+			if !send(pkt) {
+				atomic.AddInt32(alive, -1)
+				return
+			}
+		case <-chatTicker.C:
+			chatCmd, _ := json.Marshal(CommandMessage{Cmd: "chat|hello"})
+			pkt := packPacket(Message{ID: MSG_ID_COMMAND, Data: chatCmd})
+			if !send(pkt) {
+				atomic.AddInt32(alive, -1)
+				return
+			}
+		case <-heartbeatTicker.C:
+			pkt := packPacket(Message{ID: MSG_ID_HEARTBEAT, Data: json.RawMessage("null")})
+			if !send(pkt) {
+				atomic.AddInt32(alive, -1)
+				return
+			}
+		}
+	}
+}
+
+func drainConn(conn net.Conn) {
+	buf := make([]byte, 4096)
+	for {
+		_, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+	}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\aoi.go
+// internal/aoi.go
+package internal
+
+import (
+	"sync"
+)
+
+type AOIManager struct {
+	MinX, MaxX, MinZ, MaxZ int
+	GridsX, GridsZ         int
+	grids                  map[int]*Grid
+}
+
+type Grid struct {
+	players map[string]*User
+	lock    sync.RWMutex
+}
+
+func NewAOIManager(minX, maxX, minZ, maxZ, gridSize int) *AOIManager {
+	am := &AOIManager{
+		MinX: minX, MaxX: maxX, MinZ: minZ, MaxZ: maxZ,
+		GridsX: (maxX - minX) / gridSize,
+		GridsZ: (maxZ - minZ) / gridSize,
+		grids:  make(map[int]*Grid),
+	}
+	for z := 0; z < am.GridsZ; z++ {
+		for x := 0; x < am.GridsX; x++ {
+			gid := z*am.GridsX + x
+			am.grids[gid] = &Grid{players: make(map[string]*User)}
+		}
+	}
+	return am
+}
+
+func (am *AOIManager) GetGridIDByPos(x, z float32) int {
+	gx := (int(x) - am.MinX) / Conf.AOI.GridSize
+	gz := (int(z) - am.MinZ) / Conf.AOI.GridSize
+	return gz*am.GridsX + gx
+}
+
+func (am *AOIManager) GetSurroundingGridIDs(gid int) (gridIDs []int) {
+	gridIDs = append(gridIDs, gid)
+	x, z := gid%am.GridsX, gid/am.GridsX
+	for i := -1; i <= 1; i++ {
+		for j := -1; j <= 1; j++ {
+			if i == 0 && j == 0 {
+				continue
+			}
+			newX, newZ := x+j, z+i
+			if newX >= 0 && newX < am.GridsX && newZ >= 0 && newZ < am.GridsZ {
+				gridIDs = append(gridIDs, newZ*am.GridsX+newX)
+			}
+		}
+	}
+	return
+}
+
+func (am *AOIManager) GetPlayersInGrids(gridIDs []int) (players []*User) {
+	for _, gid := range gridIDs {
+		am.grids[gid].lock.RLock()
+		for _, player := range am.grids[gid].players {
+			players = append(players, player)
+		}
+		am.grids[gid].lock.RUnlock()
+	}
+	return
+}
+
+func (am *AOIManager) AddPlayerToGrid(user *User, gid int) {
+	am.grids[gid].lock.Lock()
+	am.grids[gid].players[user.Name] = user
+	am.grids[gid].lock.Unlock()
+}
+
+func (am *AOIManager) RemovePlayerFromGrid(user *User, gid int) {
+	am.grids[gid].lock.Lock()
+	delete(am.grids[gid].players, user.Name)
+	am.grids[gid].lock.Unlock()
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\config.go
+// internal/config.go
+package internal
+
+import (
+	"fmt"
+	"github.com/spf13/viper"
+	"strings"
+)
+
+// Config 对应 config.yaml 的顶级结构
+var Conf Config
+
+type Config struct {
+	Server   ServerConfig   `mapstructure:"server"`
+	Database DatabaseConfig `mapstructure:"database"`
+	Cache    CacheConfig    `mapstructure:"cache"`
+	Log      LogConfig      `mapstructure:"log"`
+	AOI      AOIConfig      `mapstructure:"aoi"`
+	MQ       MQConfig       `mapstructure:"mq"`
+}
+
+type ServerConfig struct {
+	TcpPort             int            `mapstructure:"tcp_port"`
+	GrpcPort            int            `mapstructure:"grpc_port"`
+	WsProxyPort         int            `mapstructure:"ws_proxy_port"`
+	MaxConnections      int            `mapstructure:"max_connections"`
+	MaxPacketsPerSecond int            `mapstructure:"max_packets_per_second"`
+	MaxPlayerSpeed      float64        `mapstructure:"max_player_speed"`
+	SpawnPoint          PlayerPosition `mapstructure:"spawn_point"`
+}
+type MQConfig struct {
+	Url       string `mapstructure:"url"`
+	QueueName string `mapstructure:"queue_name"`
+}
+type AOIConfig struct {
+	GridSize int `mapstructure:"grid_size"`
+}
+type DatabaseConfig struct {
+	MongoURI string `mapstructure:"mongo_uri"`
+}
+
+type CacheConfig struct {
+	RedisAddr string `mapstructure:"redis_addr"`
+}
+
+type LogConfig struct {
+	Level string `mapstructure:"level"`
+}
+
+// InitConfig 初始化函数，在 main.go 中调用
+func InitConfig() {
+	viper.SetConfigName("config") // 配置文件名 (不带后缀)
+	viper.SetConfigType("yaml")   // 配置文件类型
+	viper.AddConfigPath(".")      // 配置文件路径 (当前目录)
+	// --- 【新增】让 Viper 读取环境变量 ---
+	// 1. 将配置中的点号 (.) 替换为下划线 (_)
+	//    例如 config.yaml 里的 database.mongo_uri 会对应环境变量 DATABASE_MONGO_URI
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	viper.AutomaticEnv()
+	// ----------------------------------
+
+	if err := viper.ReadInConfig(); err != nil {
+		fmt.Printf("Warning: config file not found (%s), utilizing environment variables\n", err)
+	}
+
+	// 将配置反序列化到 Conf 结构体中
+	if err := viper.Unmarshal(&Conf); err != nil {
+		panic(fmt.Errorf("unable to decode into struct, %v", err))
+	}
+
+	fmt.Println("Configuration loaded successfully!")
+	fmt.Printf("TCP Port from config: %d\n", Conf.Server.TcpPort)
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\consumer.go
+// consumer.go 独立消费 RabbitMQ 聊天日志队列，写入 MongoDB，实现异步解耦与削峰。
+package internal
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+)
+
+// RunChatLogConsumer 启动消费者：从 MQ 拉取消息并写入 MongoDB。
+// 需在 InitMQ() 之后调用；在 gamed 中与主服务同进程运行，也可单独起进程只跑此消费者。
+func RunChatLogConsumer() {
+	msgs, err := MQChannel.Consume(
+		Conf.MQ.QueueName,
+		"",   // 消费者标签
+		true, // auto-ack
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Printf("无法注册消费者: %v", err)
+		return
+	}
+
+	fmt.Println("正在监听 MQ 聊天日志队列，准备写入数据库...")
+
+	go func() {
+		for d := range msgs {
+			var logEntry ChatLog
+			if err := json.Unmarshal(d.Body, &logEntry); err != nil {
+				log.Printf("MQ 消息解析失败: %v", err)
+				continue
+			}
+			SaveChatLog(logEntry.SessionID, logEntry.Sender, logEntry.Message)
+		}
+	}()
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\db.go
+// db.go
+package internal
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+const (
+	playerCacheKeyPrefix = "player:"
+	playerCacheTTL       = 10 * time.Minute
+	playerEmptyTTL       = 1 * time.Minute
+	playerEmptyMarker    = "__empty__"
+)
+
+var DB *mongo.Database
+var UserCollection *mongo.Collection
+var BlacklistCollection *mongo.Collection
+var ChatCollection *mongo.Collection
+
+var DefaultSensitiveWords = []string{
+	"外挂",
+	"傻",
+	"fuck",
+	"傻逼",
+	"垃圾",
+	"GM",
+	"死",
+	"妈",
+	"全家",
+}
+
+// 定义存入数据库的玩家结构 (Model)
+type PlayerModel struct {
+	UniqueKey string  `bson:"unique_key"`
+	Username  string  `bson:"username"`
+	LastIp    string  `bson:"last_ip"`
+	PositionX float32 `bson:"pos_x"`
+	PositionY float32 `bson:"pos_y"`
+	PositionZ float32 `bson:"pos_z"`
+	UpdatedAt int64   `bson:"updated_at"`
+	LastScene string  `bson:"last_scene"`
+}
+
+type ChatLog struct {
+	SessionID string `bson:"session_id"`
+	Sender    string `bson:"sender"`
+	Message   string `bson:"message"` // 存过滤后的内容
+	Timestamp int64  `bson:"timestamp"`
+}
+
+func InitDB() {
+	// 设置连接超时
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mongoURI := Conf.Database.MongoURI
+	clientOptions := options.Client().ApplyURI(mongoURI)
+	client, err := mongo.Connect(ctx, clientOptions)
+	if err != nil {
+		log.Fatal("数据库连接失败:", err)
+	}
+
+	// 检查连接
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		log.Fatal("数据库无法 Ping 通:", err)
+	}
+
+	fmt.Println("MongoDB 连接成功！")
+
+	// 获取数据库和集合
+	DB = client.Database("UnityGameDB")
+	UserCollection = DB.Collection("users")
+	BlacklistCollection = DB.Collection("blacklist")
+	ChatCollection = DB.Collection("chat_logs")
+}
+
+// 辅助函数：保存/更新玩家数据
+func SavePlayerToDB(uniqueKey string, name string, pos PlayerPosition, roomName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	filter := bson.M{"unique_key": uniqueKey}
+	update := bson.M{
+		"$set": bson.M{
+			"username":   name,
+			"pos_x":      pos.X,
+			"pos_y":      pos.Y,
+			"pos_z":      pos.Z,
+			"last_scene": roomName,
+			"updated_at": time.Now().Unix(),
+		},
+	}
+	// Upsert: true 表示如果不存在则插入，存在则更新
+	opts := options.Update().SetUpsert(true)
+
+	_, err := UserCollection.UpdateOne(ctx, filter, update, opts)
+	if err != nil {
+		fmt.Println("保存玩家数据失败:", err)
+	}
+}
+
+func LoadPlayerFromDB(uniqueKey string) (*PlayerModel, bool) {
+	cacheKey := playerCacheKeyPrefix + uniqueKey
+
+	// 先查 Redis 缓存
+	val, err := RDB.Get(Ctx, cacheKey).Result()
+	if err == nil {
+		if val == playerEmptyMarker {
+			return nil, false
+		}
+		var result PlayerModel
+		if json.Unmarshal([]byte(val), &result) == nil {
+			return &result, true
+		}
+	}
+
+	// 未命中则查 MongoDB
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var result PlayerModel
+	filter := bson.M{"unique_key": uniqueKey}
+	err = UserCollection.FindOne(ctx, filter).Decode(&result)
+	if err != nil {
+		// MongoDB 也没有则写空值缓存防穿透，TTL=1min
+		RDB.Set(Ctx, cacheKey, playerEmptyMarker, playerEmptyTTL)
+		return nil, false
+	}
+
+	// 命中 MongoDB，写缓存 TTL=10min
+	if data, e := json.Marshal(&result); e == nil {
+		RDB.Set(Ctx, cacheKey, string(data), playerCacheTTL)
+	}
+	return &result, true
+}
+
+func DefaultWordsToBson() []interface{} {
+	arr := make([]interface{}, 0, len(DefaultSensitiveWords))
+	for _, w := range DefaultSensitiveWords {
+		arr = append(arr, bson.M{"word": w})
+	}
+	return arr
+}
+
+func LoadSensitiveWords() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cursor, err := BlacklistCollection.Find(ctx, bson.M{})
+	if err != nil {
+		fmt.Println("加载黑名单失败 (可能为空):", err)
+		return DefaultSensitiveWords
+	}
+	defer cursor.Close(ctx)
+
+	var words []string
+	for cursor.Next(ctx) {
+		var result struct {
+			Word string `bson:"word"`
+		}
+		if err := cursor.Decode(&result); err == nil {
+			words = append(words, result.Word)
+		}
+	}
+
+	// 如果数据库内容为空，写入默认词库
+	if len(words) == 0 {
+		fmt.Println("检测到数据库黑名单为空，正在初始化默认词库...")
+		_, err := BlacklistCollection.InsertMany(ctx, DefaultWordsToBson())
+		if err != nil {
+			fmt.Println("默认词库写入失败:", err)
+		}
+		return DefaultSensitiveWords
+	}
+
+	fmt.Printf("成功加载敏感词库: %d 个词\n", len(words))
+	return words
+}
+
+func SaveChatLog(sessionID, sender, msg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	logEntry := ChatLog{
+		SessionID: sessionID,
+		Sender:    sender,
+		Message:   msg,
+		Timestamp: time.Now().Unix(),
+	}
+
+	_, err := ChatCollection.InsertOne(ctx, logEntry)
+	if err != nil {
+		fmt.Println("保存聊天记录失败:", err)
+	}
+}
+
+func GetRecentChatLogs(sessionID string, limit int64) []ChatLog {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	filter := bson.M{"session_id": sessionID}
+
+	opts := options.Find().SetSort(bson.D{{"timestamp", -1}}).SetLimit(limit)
+
+	cursor, err := ChatCollection.Find(ctx, filter, opts)
+	if err != nil {
+		return nil
+	}
+	defer cursor.Close(ctx)
+
+	var logs []ChatLog
+	if err = cursor.All(ctx, &logs); err != nil {
+		return nil
+	}
+
+	//反转切片获得正确数据
+	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
+		logs[i], logs[j] = logs[j], logs[i]
+	}
+
+	return logs
+}
+
+//func SavePrivateChatLog(sender, target, msg string) {
+//	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+//	defer cancel()
+//
+//	// 生成一个唯一的会话ID，无论 A发给B 还是 B发给A，SessionID 都一样
+//	// 简单算法：按字典序排序两个名字，中间加下划线
+//	var sessionID string
+//	if sender < target {
+//		sessionID = "PM_" + sender + "_" + target
+//	} else {
+//		sessionID = "PM_" + target + "_" + sender
+//	}
+//
+//	logEntry := ChatLog{
+//		SessionID: sessionID,
+//		Sender:    sender,
+//		Message:   msg,
+//		Timestamp: time.Now().Unix(),
+//	}
+//
+//	_, err := ChatCollection.InsertOne(ctx, logEntry)
+//	if err != nil {
+//		fmt.Println("保存私聊记录失败:", err)
+//	} else {
+//		fmt.Printf("私聊记录已保存: %s -> %s\n", sender, target)
+//	}
+//}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\filter.go
+package internal
+
+import (
+	"regexp"
+	"strings"
+	"sync"
+)
+
+// 全局过滤器实例
+var WordFilter *FilterManager
+
+type FilterManager struct {
+	trieRoot *TrieNode
+	lock     sync.RWMutex
+}
+
+// DFA 算法的节点结构 (字典树)
+type TrieNode struct {
+	children map[rune]*TrieNode
+	isEnd    bool
+}
+
+func NewFilterManager() *FilterManager {
+	return &FilterManager{
+		trieRoot: &TrieNode{children: make(map[rune]*TrieNode)},
+	}
+}
+
+// 1. 构建字典树 (将数据库查出来的词列表塞入内存)
+func (this *FilterManager) Build(words []string) {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+
+	this.trieRoot = &TrieNode{children: make(map[rune]*TrieNode)} // 重置树
+
+	for _, word := range words {
+		node := this.trieRoot
+		// 将字符串转为 rune 数组 (处理中文)
+		runes := []rune(word)
+		for _, r := range runes {
+			if _, ok := node.children[r]; !ok {
+				node.children[r] = &TrieNode{children: make(map[rune]*TrieNode)}
+			}
+			node = node.children[r]
+		}
+		node.isEnd = true
+	}
+}
+
+// 2. 敏感词替换 (DFA 算法核心)
+func (this *FilterManager) Censor(text string) string {
+	this.lock.RLock()
+	defer this.lock.RUnlock()
+
+	chars := []rune(text)
+	length := len(chars)
+	var sb strings.Builder
+
+	for i := 0; i < length; {
+		node := this.trieRoot
+		j := i
+		matchLen := 0
+
+		// 尝试匹配最长敏感词
+		for j < length {
+			next, ok := node.children[chars[j]]
+			if !ok {
+				break
+			}
+			node = next
+			j++
+			if node.isEnd {
+				matchLen = j - i // 记录匹配长度
+			}
+		}
+
+		if matchLen > 0 {
+			// 发现敏感词，替换为 *
+			sb.WriteString("***")
+			i += matchLen // 跳过敏感词部分
+		} else {
+			// 不是敏感词，原样追加
+			sb.WriteRune(chars[i])
+			i++
+		}
+	}
+	return sb.String()
+}
+
+// 3. 移除 HTML 标签 (防止 <color=red> 破坏 UI)
+// 使用正则将 <...> 的内容全部替换为空
+func (this *FilterManager) StripTags(text string) string {
+	// 正则表达式：匹配 < 开头，中间任意字符，> 结尾
+	re := regexp.MustCompile(`<[^>]*>`)
+	return re.ReplaceAllString(text, "")
+}
+
+// 综合处理入口
+func (this *FilterManager) Handle(text string) string {
+	// 先剥离 HTML 标签 (防止有人利用标签绕过屏蔽，比如 <c>操</c>作)
+	cleanText := this.StripTags(text)
+	// 再过滤敏感词
+	safeText := this.Censor(cleanText)
+	return safeText
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\grpc_server.go
+// in internal/grpc_server.go
+package internal
+
+import (
+	"context"
+	"fmt"
+	"github.com/go-redis/redis/v8"
+	pb "unityserverupgrade/proto"
+)
+
+// 【核心修正】将 'l' 改为大写 'L'，将其导出
+type LeaderboardServer struct {
+	pb.UnimplementedLeaderboardServiceServer
+}
+
+// 【对应修正】方法的接收者也要改成大写
+func (s *LeaderboardServer) SubmitScore(ctx context.Context, req *pb.SubmitScoreRequest) (*pb.SubmitScoreResponse, error) {
+	// ... 方法内部逻辑完全不变 ...
+	fmt.Printf("收到 SubmitScore 请求: Player=%s, Score=%d\n", req.PlayerName, req.Score)
+	err := RDB.ZAdd(Ctx, "leaderboard", &redis.Z{
+		Score:  float64(req.Score),
+		Member: req.PlayerName,
+	}).Err()
+	if err != nil {
+		return &pb.SubmitScoreResponse{Success: false}, err
+	}
+	return &pb.SubmitScoreResponse{Success: true}, nil
+}
+
+// 【对应修正】方法的接收者也要改成大写
+func (s *LeaderboardServer) GetTopPlayers(ctx context.Context, req *pb.GetTopPlayersRequest) (*pb.GetTopPlayersResponse, error) {
+	// ... 方法内部逻辑完全不变 ...
+	fmt.Printf("收到 GetTopPlayers 请求: Limit=%d\n", req.Limit)
+	results, err := RDB.ZRevRangeWithScores(Ctx, "leaderboard", 0, int64(req.Limit-1)).Result()
+	if err != nil {
+		return nil, err
+	}
+	response := &pb.GetTopPlayersResponse{}
+	for i, member := range results {
+		response.Players = append(response.Players, &pb.PlayerRankInfo{
+			Rank:       int32(i + 1),
+			PlayerName: member.Member.(string),
+			Score:      int32(member.Score),
+		})
+	}
+	return response, nil
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\message.go
+package internal
+
+import "encoding/json"
+
+// C -> S: 客户端上报自己的位置
+// 后面的表示会被json解析为怎样的字符
+type PlayerPosition struct {
+	X float32 `json:"x"`
+	Y float32 `json:"y"`
+	Z float32 `json:"z"`
+}
+
+// S -> C: 服务器广播的单个玩家状态
+type PlayerState struct {
+	Name     string         `json:"name"`
+	Position PlayerPosition `json:"pos"`
+}
+
+// S -> C: 服务器广播的完整场景状态
+type SceneStateBroadcast struct {
+	Players map[string]PlayerState `json:"players"`
+}
+
+// 通用消息结构，用于识别消息类型
+type Message struct {
+	ID   int             `json:"id"`
+	Data json.RawMessage `json:"data"` // 使用 RawMessage 延迟解析，非常高效
+}
+
+// C# 客户端会将 CommandMessage 对象序列化成 {"cmd":"rename|张三"}
+// 这个结构体就是用来解析这个 JSON 的
+type CommandMessage struct {
+	Cmd string `json:"cmd"`
+} //通常，当你用 json.Unmarshal 解析一个 JSON 字符串到一个结构体时，它会把 JSON 的所有部分都解析并填充到对应的字段里
+
+// 定义消息ID常量，必须与客户端完全一致
+// 这部分代码使用 const 关键字定义了一组常量，它们是客户端和服务器之间预先约定好的“协议号”或“消息类型ID”。
+const (
+	MSG_ID_TEXT_MESSAGE = 0    // S->C 普通文本消息
+	MSG_ID_COMMAND      = 1001 // C->S 客户端发来的文本指令
+
+	MSG_ID_HEARTBEAT = 1002 //
+
+	MSG_ID_SCENE_STATE     = 2001 // S->C 场景状态广播
+	MSG_ID_PLAYER_MOVE_REQ = 2002 // C->S 玩家移动上报
+)
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\mq.go
+// internal/mq.go
+package internal
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+)
+
+// 全局 MQ 信道变量
+var MQChannel *amqp.Channel
+
+// InitMQ 初始化 RabbitMQ 连接并声明队列
+func InitMQ() {
+	// 1. 连接 RabbitMQ (地址从 config.yaml 读取)
+	conn, err := amqp.Dial(Conf.MQ.Url)
+	if err != nil {
+		log.Fatalf("无法连接到 RabbitMQ: %v", err)
+	}
+	// 注意：在大型项目中，建议在这里保存 conn 并在 main 退出时关闭，这里为了演示保持简洁
+
+	// 2. 打开通道 (Channel)
+	ch, err := conn.Channel()
+	if err != nil {
+		log.Fatalf("无法打开 MQ Channel: %v", err)
+	}
+	MQChannel = ch
+
+	// 3. 声明队列 (如果不存在则创建，durable=true 表示 MQ 重启后队列依然存在)
+	_, err = ch.QueueDeclare(
+		Conf.MQ.QueueName, // 队列名，如 "chat_logs"
+		true,              // 持久化 (durable)
+		false,             // 自动删除
+		false,             // 排他性
+		false,             // no-wait
+		nil,               // 参数
+	)
+	if err != nil {
+		log.Fatalf("无法声明队列: %v", err)
+	}
+
+	fmt.Println("RabbitMQ 连接成功，队列已就绪！")
+}
+
+// PublishChatLogToMQ 【生产者】：将聊天记录投递到 MQ
+func PublishChatLogToMQ(sessionID, sender, msg string) {
+	// 直接复用 db.go 里的 ChatLog 结构体，保证数据字段一致
+	logMsg := ChatLog{
+		SessionID: sessionID,
+		Sender:    sender,
+		Message:   msg,
+		Timestamp: time.Now().Unix(),
+	}
+
+	body, err := json.Marshal(logMsg)
+	if err != nil {
+		log.Printf("解析 JSON 失败: %v", err)
+		return
+	}
+
+	// 设置 5 秒发送超时 context
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 投递消息
+	err = MQChannel.PublishWithContext(ctx,
+		"",                // exchange (使用默认交换机)
+		Conf.MQ.QueueName, // routing key (必须与队列名一致)
+		false,             // mandatory
+		false,             // immediate
+		amqp.Publishing{
+			DeliveryMode: amqp.Persistent, // 消息持久化，防止 MQ 宕机丢失未处理的消息
+			ContentType:  "application/json",
+			Body:         body,
+		})
+
+	if err != nil {
+		log.Printf("MQ 发送失败: %v", err)
+	}
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\redis.go
+// redis.go
+package internal
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/go-redis/redis/v8"
+)
+
+var RDB *redis.Client
+var Ctx = context.Background()
+
+// 每用户每秒允许的消息条数（仅聊天类接口）
+const messagesPerSecond = 10
+
+func InitRedis() {
+	addr := Conf.Cache.RedisAddr
+
+	RDB = redis.NewClient(&redis.Options{
+		Addr:     addr, // Redis 服务器地址
+		Password: "",   // 没有密码，填空
+		DB:       0,    // 使用默认 DB
+	})
+
+	// 检查连接
+	_, err := RDB.Ping(Ctx).Result()
+	if err != nil {
+		fmt.Println("Redis 连接失败:", err)
+		panic(err)
+	}
+
+	fmt.Println("Redis 连接成功！")
+}
+
+// AllowMessage 使用 Redis 固定窗口限流（纯 Go，无 Lua），每用户每秒最多 messagesPerSecond 条消息；允许返回 true，超限返回 false。
+// key = ratelimit:msg:{userKey}:{当前秒}，INCR 后若为 1 则设置 EXPIRE 2s，计数≤10 则放行。
+func AllowMessage(userKey string) bool {
+	if userKey == "" {
+		return false
+	}
+	now := time.Now().Unix()
+	key := "ratelimit:msg:" + userKey + ":" + strconv.FormatInt(now, 10)
+	n, err := RDB.Incr(Ctx, key).Result()
+	if err != nil {
+		return false
+	}
+	if n == 1 {
+		RDB.Expire(Ctx, key, 2*time.Second)
+	}
+	return n <= int64(messagesPerSecond)
+}
+
+// TryRenameLock 对 newName 加分布式锁，key=lock:rename:{newName}，TTL=3s；获取成功返回 true。
+func TryRenameLock(newName string) bool {
+	key := "lock:rename:" + newName
+	ok, err := RDB.SetNX(Ctx, key, "1", 3*time.Second).Result()
+	if err != nil {
+		return false
+	}
+	return ok
+}
+
+// UnlockRename 释放重命名锁。
+func UnlockRename(newName string) {
+	key := "lock:rename:" + newName
+	RDB.Del(Ctx, key)
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\room.go
+// room.go
+package internal
+
+import (
+	"encoding/json"
+	"fmt"
+	"sync"
+	"time"
+)
+
+type Room struct {
+	Name       string
+	Members    map[string]*User
+	SessionID  string //用于数据库做标识
+	server     *Server
+	ticker     *time.Ticker // 新增：用于定时广播场景状态的定时器
+	stopChan   chan bool    // 新增：用于停止定时器的通道
+	MaxPlayers int
+	Password   string
+	roomLock   sync.RWMutex
+	aoiManager *AOIManager
+}
+
+// 创建一个新房间并启动其游戏循环
+func NewRoom(name string, maxPlayers int, password string, server *Server) *Room {
+	room := &Room{
+		Name:       name,
+		SessionID:  fmt.Sprintf("%s_%d", name, time.Now().UnixNano()),
+		Members:    make(map[string]*User),
+		server:     server,
+		ticker:     time.NewTicker(33 * time.Millisecond), //30hz
+		stopChan:   make(chan bool),
+		MaxPlayers: maxPlayers,
+		Password:   password,
+		aoiManager: NewAOIManager(-2000, 2000, -2000, 2000, Conf.AOI.GridSize),
+	}
+	go room.Run() // 【重要】在创建时就启动房间的逻辑循环
+	return room
+}
+
+// 房间的核心逻辑循环 (游戏循环)
+func (this *Room) Run() {
+	fmt.Printf("房间 '%s' 的游戏循环已启动...\n", this.Name)
+	for {
+		select {
+		case <-this.ticker.C:
+			// 定时器触发，广播当前场景的所有玩家状态
+			this.BroadcastSceneState()
+		case <-this.stopChan:
+			// 收到停止信号，停止定时器并退出循环
+			this.ticker.Stop()
+			fmt.Printf("房间 '%s' 的游戏循环已停止。\n", this.Name)
+			return
+		}
+	}
+}
+
+// 停止房间的循环
+func (this *Room) Stop() {
+	// 使用 select 防止重复关闭 channel 导致 panic
+	select {
+	case this.stopChan <- true:
+	default:
+	}
+}
+
+// 广播场景状态
+func (this *Room) BroadcastSceneState() {
+	// 【注意】这里需要同时锁住 server.mapLock 和 room 自身的成员列表
+	// 但为了简化，我们假设在房间内的玩家状态不会在广播期间被外部修改
+	// 更严谨的做法是为 Room 的 Members 也增加一个锁
+	this.roomLock.RLock()
+	// 1. 构建场景中所有玩家的状态
+	playerStates := make(map[string]PlayerState)
+	for _, member := range this.Members {
+		playerStates[member.Name] = PlayerState{
+			Name:     member.Name,
+			Position: member.Position,
+		}
+	}
+	this.roomLock.RUnlock()
+
+	// 2. 构建广播消息
+	broadcastData := SceneStateBroadcast{
+		Players: playerStates,
+	}
+	jsonData, _ := json.Marshal(broadcastData)
+
+	// 3. 封装成通用Message格式
+	msg := Message{
+		ID:   MSG_ID_SCENE_STATE,
+		Data: jsonData,
+	}
+	finalMsgBytes, _ := json.Marshal(msg)
+
+	// 4. 在房间内广播
+	for _, member := range this.Members {
+		member.Send(finalMsgBytes)
+	}
+}
+
+// 房间内广播【文本】消息
+func (this *Room) BroadcastTextMessage(sender *User, msg string) {
+	formattedMsg := fmt.Sprintf("[房间:%s][%s]: %s", this.Name, sender.Name, msg)
+
+	// 【核心修改】我们现在需要把消息广播给房间里的【所有人】，包括发送者自己
+	for _, member := range this.Members {
+		// 我们不再需要 if member.Name != sender.Name 这个判断了
+		member.Send(PackTextMessage(formattedMsg))
+	}
+}
+
+// 添加成员
+func (this *Room) AddMember(user *User) {
+	this.roomLock.Lock()
+	this.Members[user.Name] = user
+	this.roomLock.Unlock()
+	user.Room = this
+
+	user.ForceTeleport(user.Position)
+
+	gid := this.aoiManager.GetGridIDByPos(user.Position.X, user.Position.Z)
+	this.aoiManager.AddPlayerToGrid(user, gid)
+
+	// 2. 准备广播消息
+	joinMsg := fmt.Sprintf("[房间:%s][系统]: %s 加入了房间。", this.Name, user.Name)
+	packedMsg := PackTextMessage(joinMsg)
+
+	// 3. 【AOI应用】获取该玩家附近的九宫格玩家
+	surroundingGIDs := this.aoiManager.GetSurroundingGridIDs(gid)
+	playersToNotify := this.aoiManager.GetPlayersInGrids(surroundingGIDs)
+
+	// 4. 只向这些附近的玩家广播消息
+	for _, player := range playersToNotify {
+		player.Send(packedMsg)
+	}
+}
+
+// 移除成员
+func (this *Room) RemoveMember(user *User) bool {
+	leaveMsg := fmt.Sprintf("[房间:%s][系统]: %s 离开了房间。", this.Name, user.Name)
+	packedMsg := PackTextMessage(leaveMsg)
+
+	// 2. 【AOI应用】获取该玩家【最后位置】附近的九宫格玩家
+	gid := this.aoiManager.GetGridIDByPos(user.Position.X, user.Position.Z)
+	surroundingGIDs := this.aoiManager.GetSurroundingGridIDs(gid)
+	playersToNotify := this.aoiManager.GetPlayersInGrids(surroundingGIDs)
+
+	// 3. 只向这些附近的玩家广播消息
+	for _, player := range playersToNotify {
+		player.Send(packedMsg)
+	}
+
+	// 4. 从 AOI 管理器中移除该玩家
+	this.aoiManager.RemovePlayerFromGrid(user, gid)
+
+	this.roomLock.Lock()
+	delete(this.Members, user.Name)
+	this.roomLock.Unlock()
+	user.Room = nil
+
+	// 如果房间里没人了，就准备销毁
+	if len(this.Members) == 0 {
+		this.Stop() // 停止游戏循环
+		fmt.Printf("房间 '%s' 因空无一人已被标记为待销毁。\n", this.Name)
+		return true // 【修改】返回 true
+	}
+
+	return false // 【修改】返回 false
+}
+
+//func (this *Room) IsFull() bool {
+//	this.roomLock.RLock()
+//	defer this.roomLock.RUnlock()
+//	return len(this.Members) >= this.MaxPlayers
+//}
+//
+//func (this *Room) CheckPassword(inputPwd string) bool {
+//	// 如果没密码，直接通过
+//	if this.Password == "" {
+//		return true
+//	}
+//	return this.Password == inputPwd
+//}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\server.go
+package internal
+
+import (
+	"encoding/binary"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"sync"
+	"time"
+)
+
+const (
+	reqTypeRegister = iota
+	reqTypeUnregister
+	reqTypeBroadcast
+)
+const (
+	HeartbeatTimeout = 30 * time.Second
+)
+
+type request struct {
+	reqType int
+	user    *User
+	msg     []byte
+}
+
+type Server struct {
+	Ip   string
+	Port int
+
+	// 【混合模式】保留 mapLock，主要用于保护读操作
+	OnlineMap map[string]*User
+	mapLock   sync.RWMutex
+
+	Rooms    map[string]*Room
+	roomLock sync.RWMutex
+
+	requests chan request
+}
+
+// requests 通道缓冲需 >= max_connections，否则大量同时建连时，第 (缓冲+1) 个连接会阻塞在 Online()，无法读包，客户端 Write 也会卡住，表现为“压测只能到约 250 连接”。
+func NewServer(ip string, port int) *Server {
+	buf := Conf.Server.MaxConnections * 2
+	if buf < 2048 {
+		buf = 2048
+	}
+	return &Server{
+		Ip:        ip,
+		Port:      port,
+		OnlineMap: make(map[string]*User),
+		Rooms:     make(map[string]*Room),
+		requests:  make(chan request, buf),
+	}
+}
+
+func (this *Server) Start() {
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", this.Ip, this.Port))
+	if err != nil {
+		fmt.Println("net.Listen err:", err)
+		return
+	}
+	defer listener.Close()
+
+	go this.RunLoop()
+
+	go this.CleanupDeadConnections()
+
+	for {
+		conn, err := listener.Accept() //关键代码
+		if err != nil {
+			fmt.Println("listener accept err:", err)
+			continue
+		}
+		this.mapLock.RLock()
+		currentConnections := len(this.OnlineMap)
+		this.mapLock.RUnlock()
+
+		if currentConnections >= Conf.Server.MaxConnections {
+			log.Printf("连接被拒绝: 服务器已满 (%d/%d)", currentConnections, Conf.Server.MaxConnections)
+			// 【重要】拒绝后要立刻关闭连接，并 continue 到下一次 accept
+			conn.Close()
+			continue
+		}
+		go this.Handler(conn)
+	}
+}
+
+func (this *Server) CleanupDeadConnections() {
+	// 每 10 秒检查一次
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// 用来存放需要被踢下线的用户列表
+		usersToKick := []*User{}
+
+		this.mapLock.RLock()
+		for _, user := range this.OnlineMap {
+			// 检查用户是否超时
+			if time.Since(user.lastHeartbeat) > HeartbeatTimeout {
+				usersToKick = append(usersToKick, user)
+			}
+		}
+		this.mapLock.RUnlock()
+
+		// 遍历列表，执行踢人操作
+		for _, user := range usersToKick {
+			log.Printf("用户 [%s] 因心跳超时被服务器主动断开连接。", user.Name)
+			// 调用 user.Offline() 会处理所有下线逻辑（离开房间、保存数据等）
+			// Offline 内部有锁，可以安全地并发调用
+			user.Offline()
+		}
+	}
+}
+
+// RunLoop 负责所有的【写】操作，确保写的安全性
+func (this *Server) RunLoop() {
+	for req := range this.requests {
+		switch req.reqType {
+		case reqTypeRegister:
+			// 写操作，加锁
+			this.mapLock.Lock()
+			this.OnlineMap[req.user.Name] = req.user
+			this.mapLock.Unlock()
+
+			broadcastMsg := "[" + req.user.Addr + "]" + req.user.Name + " 上线啦 (全局消息)"
+			fmt.Println(broadcastMsg)
+
+			// 广播时只读，加读锁
+
+			this.sendBroadcastToAll(broadcastMsg)
+
+		case reqTypeUnregister:
+			this.mapLock.Lock()
+			if _, ok := this.OnlineMap[req.user.Name]; ok {
+				delete(this.OnlineMap, req.user.Name)
+				this.mapLock.Unlock() // 先解锁，再广播
+
+				broadcastMsg := "[" + req.user.Addr + "]" + req.user.Name + " 下线了 (全局消息)"
+				fmt.Println(broadcastMsg)
+
+				this.sendBroadcastToAll(broadcastMsg)
+			} else {
+				this.mapLock.Unlock()
+			}
+
+		case reqTypeBroadcast:
+			this.mapLock.RLock()
+			for _, user := range this.OnlineMap {
+				user.Send(req.msg)
+			}
+			this.mapLock.RUnlock()
+		}
+	}
+}
+
+func (this *Server) Handler(conn net.Conn) {
+	user := NewUser(conn, this)
+	user.Online()
+	defer user.Offline()
+
+	const KeepAliveDuration = 30 * time.Second
+
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(KeepAliveDuration))
+		head := make([]byte, 2)
+		if _, err := io.ReadFull(conn, head); err != nil {
+			return
+		}
+		msgLen := binary.BigEndian.Uint16(head)
+		body := make([]byte, msgLen)
+		if _, err := io.ReadFull(conn, body); err != nil {
+			return
+		}
+		user.DoMessage(string(body))
+	}
+}
+
+func (this *Server) sendBroadcastToAll(msg string) {
+	packedMsg := PackTextMessage(msg)
+	this.mapLock.RLock()
+	for _, user := range this.OnlineMap {
+		user.Send(packedMsg)
+	}
+	this.mapLock.RUnlock()
+}
+
+func (this *Server) BroadCast(user *User, msg string) {
+	sendMsg := "[" + user.Addr + "]" + user.Name + ":" + msg
+	req := request{
+		reqType: reqTypeBroadcast,
+		msg:     PackTextMessage(sendMsg),
+	}
+	this.requests <- req
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\user.go
+package internal
+
+import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"net"
+	"strings"
+	"sync"
+	"time"
+)
+
+// CommandHandler 定义了一个指令处理函数的类型签名。
+// 它接收指令的参数部分，并返回一个 bool 值表示是否应继续执行后续操作。
+type CommandHandler func(args string) bool
+
+type User struct {
+	Name                   string
+	Addr                   string
+	Channel                chan []byte
+	conn                   net.Conn
+	server                 *Server
+	Room                   *Room
+	Position               PlayerPosition
+	isOnline               bool       // 标记用户是否在线
+	mu                     sync.Mutex // 用于保护 isOnline 状态的锁
+	DbKey                  string
+	lastHeartbeat          time.Time
+	lastPositionUpdateTime time.Time // 用于移动速度校验
+	packetCount            int       // 用于发包频率统计，计数器
+	lastPacketCheckTime    time.Time // 用于发包频率统计.判断是否到达一秒
+	expectTeleport         bool      //传送不触发速度检测
+	// 【新增】指令处理器映射
+	commandHandlers map[string]CommandHandler
+}
+
+type RoomInfoDTO struct {
+	Name      string `json:"n"`
+	CurPlayer int    `json:"c"`
+	MaxPlayer int    `json:"m"`
+	HasPwd    bool   `json:"p"`
+}
+
+func NewUser(conn net.Conn, server *Server) *User {
+	userAddr := conn.RemoteAddr().String()
+
+	user := &User{
+		Name:                   userAddr,
+		Addr:                   userAddr,
+		Channel:                make(chan []byte, 256),
+		conn:                   conn,
+		server:                 server,
+		Room:                   nil,
+		Position:               Conf.Server.SpawnPoint,
+		isOnline:               true,
+		DbKey:                  "",
+		lastHeartbeat:          time.Now(),
+		lastPositionUpdateTime: time.Now(),
+		packetCount:            0,
+		lastPacketCheckTime:    time.Now(),
+	}
+
+	// 【新增】初始化并注册所有带中间件的指令处理器
+	user.commandHandlers = make(map[string]CommandHandler)
+	user.commandHandlers["rename"] = user.LoggingMiddleware(user.HandleRename)
+	user.commandHandlers["who"] = user.LoggingMiddleware(user.HandleListUsers)
+	user.commandHandlers["create"] = user.LoggingMiddleware(user.HandleCreateRoom)
+	user.commandHandlers["join"] = user.LoggingMiddleware(user.HandleJoinRoom)
+	user.commandHandlers["leave"] = user.LoggingMiddleware(user.HandleLeaveRoom)
+	user.commandHandlers["rooms"] = user.LoggingMiddleware(user.HandleListRooms)
+	user.commandHandlers["chat"] = user.LoggingMiddleware(user.HandleRoomChat)
+	user.commandHandlers["pm"] = user.LoggingMiddleware(user.HandlePrivateMessage)
+	user.commandHandlers["users"] = user.LoggingMiddleware(user.HandleGetUsersJSON)
+	user.commandHandlers["shout"] = user.LoggingMiddleware(user.HandleShout)
+
+	fmt.Printf("为用户 %s 启动 ListenMessage 协程...\n", user.Name)
+	go user.ListenMessage()
+
+	return user
+}
+
+// LoggingMiddleware 是一个简单的日志中间件。
+func (this *User) LoggingMiddleware(next CommandHandler) CommandHandler {
+	return func(args string) bool {
+		// 1. 在执行真正的业务逻辑前，先打印日志
+		fmt.Printf("[中间件日志] 用户 [%s] 正在执行指令, 参数: %s\n", this.Name, args)
+		// 2. 调用并返回流水线中的下一个处理器
+		return next(args)
+	}
+}
+
+// 用户上线
+func (this *User) Online() {
+	req := request{
+		reqType: reqTypeRegister,
+		user:    this,
+	}
+	this.server.requests <- req
+}
+
+func (this *User) Offline() {
+	// 1. 检查是否已经下线 (防止多次调用)
+	this.mu.Lock()
+	if !this.isOnline {
+		this.mu.Unlock()
+		return
+	}
+	this.isOnline = false
+	this.mu.Unlock()
+
+	// 2. 数据库保存逻辑 (保持不变)
+	if this.DbKey != "" {
+		currentRoomName := ""
+		if this.Room != nil {
+			currentRoomName = this.Room.Name
+		}
+		fmt.Printf("正在保存用户 %s 的数据到数据库 (Key: %s)...\n", this.Name, this.DbKey)
+		// 异步保存，防止阻塞
+		go SavePlayerToDB(this.DbKey, this.Name, this.Position, currentRoomName)
+	}
+
+	// 3. 房间清理逻辑 (保持不变)
+	// 虽然 Map 逻辑移交了，但房间逻辑比较独立，这里先保留处理
+	if this.Room != nil {
+		roomName := this.Room.Name
+		isRoomEmpty := this.Room.RemoveMember(this) // 从房间移除自己
+		if isRoomEmpty {
+			this.server.roomLock.Lock()
+			delete(this.server.Rooms, roomName)
+			this.server.roomLock.Unlock()
+		}
+	}
+
+	req := request{
+		reqType: reqTypeUnregister,
+		user:    this,
+	}
+	this.server.requests <- req
+	// ------------------
+
+	// 5. 清理连接资源
+	this.conn.Close()
+
+	// 关闭自身的 Channel，防止内存泄漏
+	// 使用 recover 防止向已关闭的 channel 发送数据导致的 panic
+	defer func() {
+		if r := recover(); r != nil {
+			// 忽略错误
+		}
+	}()
+	close(this.Channel)
+
+	fmt.Printf("用户 %s 已成功下线并发送注销信号。\n", this.Name)
+}
+
+func (this *User) HandleShout(args string) bool {
+	if args == "" {
+		this.Send(PackTextMessage("喊话内容不能为空"))
+		return true
+	}
+
+	// 格式化消息：[世界]张三: 大家好
+	msg := fmt.Sprintf("[世界]%s: %s", this.Name, args)
+
+	// 【关键点】这里调用 Server.BroadCast
+	// 这会将一个 reqTypeBroadcast 的请求扔进 channel
+	// 最终由 Server.RunLoop 的那个 "闲置 case" 处理
+	this.server.BroadCast(this, msg)
+
+	return true
+}
+
+// 发送消息 (逻辑不变)
+func (this *User) Send(data []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+		}
+	}()
+
+	this.mu.Lock()
+	if !this.isOnline {
+		this.mu.Unlock()
+		return
+	}
+	this.mu.Unlock()
+
+	select {
+	case this.Channel <- data:
+	default:
+		fmt.Printf("用户 %s 的消息通道已满，消息被丢弃。\n", this.Name)
+	}
+}
+
+// 消息处理入口 (逻辑不变)
+func (this *User) DoMessage(msg string) {
+	if !this.IsPacketRateValid() {
+		// 频率过高，可以选择忽略此包，或者直接踢掉
+		// 这里我们选择记录日志并忽略，更温和
+		fmt.Printf("警告: 用户 [%s] 发包频率过快，此包被丢弃。\n", this.Name)
+		return
+	}
+	this.lastHeartbeat = time.Now()
+	var message Message
+	if err := json.Unmarshal([]byte(msg), &message); err != nil {
+		fmt.Printf("警告: 用户 %s 发送了非JSON格式的消息: %s\n", this.Name, msg)
+		return
+	}
+
+	if message.ID == MSG_ID_HEARTBEAT {
+		return
+	}
+
+	if message.ID != MSG_ID_PLAYER_MOVE_REQ {
+		fmt.Printf("收到来自 [%s] 的消息ID: %d\n", this.Name, message.ID)
+	}
+
+	switch message.ID {
+	case MSG_ID_PLAYER_MOVE_REQ:
+		if this.Room != nil {
+			var newPos PlayerPosition
+			if err := json.Unmarshal(message.Data, &newPos); err == nil {
+
+				// 解析成功后，再进行安全校验
+				if this.IsMovementValid(newPos) {
+					// --- AOI 位置更新逻辑 ---
+					oldGID := this.Room.aoiManager.GetGridIDByPos(this.Position.X, this.Position.Z)
+					newGID := this.Room.aoiManager.GetGridIDByPos(newPos.X, newPos.Z)
+
+					if oldGID != newGID {
+						this.Room.aoiManager.RemovePlayerFromGrid(this, oldGID)
+						this.Room.aoiManager.AddPlayerToGrid(this, newGID)
+					}
+					// -----------------------
+
+					// 更新服务器权威位置
+					this.Position = newPos
+					this.lastPositionUpdateTime = time.Now()
+				} else {
+					// 校验失败（作弊），直接忽略
+					return
+				}
+			}
+		}
+	case MSG_ID_COMMAND:
+		var cmdMsg CommandMessage
+		if err := json.Unmarshal(message.Data, &cmdMsg); err == nil {
+			this.handleCommand(cmdMsg.Cmd)
+		} else {
+			fmt.Printf("解析CommandMessage失败: %v\n", err)
+		}
+	default:
+		fmt.Printf("收到未知的消息ID: %d\n", message.ID)
+	}
+}
+
+// 【重写】handleCommand 方法，使用 map 分发
+func (this *User) handleCommand(msg string) {
+	fmt.Printf("正在处理来自 [%s] 的指令: %s\n", this.Name, msg)
+	parts := strings.SplitN(msg, "|", 2)
+	command := parts[0]
+	args := ""
+	if len(parts) > 1 {
+		args = strings.TrimSpace(parts[1])
+	}
+
+	if handler, ok := this.commandHandlers[command]; ok {
+		handler(args)
+	} else {
+		this.Send(PackTextMessage("未知指令: " + command))
+	}
+}
+
+// 消息打包 (逻辑不变)
+func PackTextMessage(msg string) []byte {
+	msgData, _ := json.Marshal(msg)
+	jsonMsg, _ := json.Marshal(Message{ID: MSG_ID_TEXT_MESSAGE, Data: msgData})
+	return jsonMsg
+}
+
+// --- 所有指令处理器 (已改造) ---
+
+func (this *User) HandleRename(args string) bool {
+	parts := strings.Split(args, "|")
+	newName := parts[0]
+	uuid := ""
+
+	if len(parts) > 1 {
+		uuid = parts[1]
+	} else {
+		uuid = this.Addr
+	}
+
+	if newName == "" {
+		this.Send(PackTextMessage("昵称不能为空"))
+		return true
+	}
+
+	if !TryRenameLock(newName) {
+		this.Send(PackTextMessage("操作冲突请重试"))
+		return true
+	}
+	defer UnlockRename(newName)
+
+	this.server.mapLock.Lock()
+	if _, ok := this.server.OnlineMap[newName]; ok {
+		this.server.mapLock.Unlock()
+		this.Send(PackTextMessage("昵称已被占用"))
+		return true
+	}
+	this.DbKey = fmt.Sprintf("%s_%s", uuid, newName)
+	this.server.mapLock.Unlock()
+
+	playerData, exists := LoadPlayerFromDB(this.DbKey)
+
+	this.server.mapLock.Lock()
+	if _, ok := this.server.OnlineMap[newName]; ok {
+		this.server.mapLock.Unlock()
+		this.Send(PackTextMessage("昵称已被占用(并发冲突)"))
+		return true
+	}
+
+	delete(this.server.OnlineMap, this.Name)
+	this.server.OnlineMap[newName] = this
+	this.server.mapLock.Unlock()
+
+	oldName := this.Name
+	this.Name = newName
+
+	if this.Room != nil {
+		delete(this.Room.Members, oldName)
+		this.Room.Members[this.Name] = this
+	}
+
+	this.Send(PackTextMessage(fmt.Sprintf("RENAME_SUCCESS|%s", this.Name)))
+
+	if exists {
+		shouldRestorePosition := false
+		if playerData.LastScene != "" {
+			this.server.roomLock.RLock()
+			_, roomExists := this.server.Rooms[playerData.LastScene]
+			this.server.roomLock.RUnlock()
+
+			if roomExists {
+				shouldRestorePosition = true
+			}
+		}
+		if shouldRestorePosition {
+			// A. 房间还在：恢复旧坐标
+			savedPos := PlayerPosition{
+				X: playerData.PositionX,
+				Y: playerData.PositionY,
+				Z: playerData.PositionZ,
+			}
+			// 这是一个合法的“传送”，给个特赦令
+			this.ForceTeleport(savedPos)
+
+			// 发送指令让客户端也加载场景并传送
+			saveMsg := fmt.Sprintf("LOAD_SAVE|%s|%.2f,%.2f,%.2f",
+				playerData.LastScene, savedPos.X, savedPos.Y, savedPos.Z)
+			this.Send(PackTextMessage(saveMsg))
+
+			this.Send(PackTextMessage("欢迎回来 [发现可恢复的房间存档]"))
+		} else {
+			// B. 房间不在了：必须重置为配置的出生点！
+			// 否则 user.Position 会残留旧数据，导致下次开房位置错误
+			this.ForceTeleport(Conf.Server.SpawnPoint)
+
+			this.Send(PackTextMessage("欢迎回来 [上次所在的房间已解散，位置已重置]"))
+		}
+
+	} else {
+		this.ForceTeleport(Conf.Server.SpawnPoint)
+		go SavePlayerToDB(this.DbKey, this.Name, this.Position, "")
+	}
+	return true
+}
+
+func (this *User) HandleJoinRoom(args string) bool {
+	parts := strings.Split(args, "|")
+	roomName := parts[0]
+	inputPwd := ""
+	if len(parts) > 1 {
+		inputPwd = parts[1]
+	}
+	this.server.roomLock.Lock()
+
+	room, ok := this.server.Rooms[roomName]
+	if !ok {
+		this.server.roomLock.Unlock()
+		this.Send(PackTextMessage("房间不存在"))
+		return true
+	}
+
+	if len(room.Members) >= room.MaxPlayers {
+		this.server.roomLock.Unlock()
+		this.Send(PackTextMessage("房间已满"))
+		return true
+	}
+
+	if room.Password != "" && room.Password != inputPwd {
+		this.server.roomLock.Unlock()
+		this.Send(PackTextMessage("密码错误"))
+		return true
+	}
+
+	if this.Room != nil {
+		oldRoomName := this.Room.Name
+		isOldRoomEmpty := this.Room.RemoveMember(this)
+		if isOldRoomEmpty {
+			delete(this.server.Rooms, oldRoomName)
+		}
+	}
+
+	this.server.roomLock.Unlock()
+
+	room.AddMember(this)
+	this.Send(PackTextMessage(fmt.Sprintf("成功加入房间 '%s'", roomName)))
+
+	historyLogs := GetRecentChatLogs(room.SessionID, 5)
+
+	if len(historyLogs) > 0 {
+		header := fmt.Sprintf("[房间:%s][系统]: -------------- 历史消息 --------------", roomName)
+		this.Send(PackTextMessage(header))
+		for _, log := range historyLogs {
+			msg := fmt.Sprintf("[房间:%s][历史-%s]: %s", roomName, log.Sender, log.Message)
+			this.Send(PackTextMessage(msg))
+		}
+		footer := fmt.Sprintf("[房间:%s][系统]: -------------------------------------", roomName)
+		this.Send(PackTextMessage(footer))
+	}
+	return true
+}
+
+func (this *User) HandleListUsers(args string) bool {
+	this.server.mapLock.RLock()
+	defer this.server.mapLock.RUnlock()
+	var userList []string
+	for _, user := range this.server.OnlineMap {
+		userList = append(userList, user.Name)
+	}
+	this.Send(PackTextMessage("当前在线用户列表: " + strings.Join(userList, ", ")))
+	return true
+}
+
+func (this *User) HandleCreateRoom(args string) bool {
+	parts := strings.Split(args, "|")
+	roomName := parts[0]
+	maxPlayers := 4
+	password := ""
+	if roomName == "" {
+		this.Send(PackTextMessage("房间名不能为空"))
+		return true
+	}
+	if len(parts) > 1 {
+		fmt.Sscanf(parts[1], "%d", &maxPlayers)
+		if maxPlayers < 1 {
+			maxPlayers = 1
+		}
+		if maxPlayers > 20 {
+			maxPlayers = 20
+		}
+	}
+
+	if len(parts) > 2 {
+		password = parts[2]
+	}
+	this.server.roomLock.Lock()
+	defer this.server.roomLock.Unlock()
+	if _, ok := this.server.Rooms[roomName]; ok {
+		this.Send(PackTextMessage("房间已存在"))
+		return true
+	}
+	if this.Room != nil {
+		oldRoomName := this.Room.Name
+		isOldRoomEmpty := this.Room.RemoveMember(this)
+		if isOldRoomEmpty {
+			delete(this.server.Rooms, oldRoomName)
+		}
+	}
+	newRoom := NewRoom(roomName, maxPlayers, password, this.server)
+	this.server.Rooms[roomName] = newRoom
+	newRoom.AddMember(this)
+	this.Send(PackTextMessage(fmt.Sprintf("房间 '%s' 创建成功", roomName)))
+	return true
+}
+
+func (this *User) HandleLeaveRoom(args string) bool {
+	if this.Room == nil {
+		this.Send(PackTextMessage("你不在任何房间中"))
+		return true
+	}
+	roomName := this.Room.Name
+	isRoomEmpty := this.Room.RemoveMember(this)
+	if isRoomEmpty {
+		this.server.roomLock.Lock()
+		delete(this.server.Rooms, roomName)
+		this.server.roomLock.Unlock()
+	}
+	this.Send(PackTextMessage("LEAVE_SUCCESS|你已成功离开房间"))
+	return true
+}
+
+func (this *User) HandleListRooms(args string) bool {
+	this.server.roomLock.RLock()
+	defer this.server.roomLock.RUnlock()
+
+	if len(this.server.Rooms) == 0 {
+		this.Send(PackTextMessage("当前没有可用房间"))
+		return true
+	}
+
+	var dtos []RoomInfoDTO
+	for _, r := range this.server.Rooms {
+		info := RoomInfoDTO{
+			Name:      r.Name,
+			CurPlayer: len(r.Members),
+			MaxPlayer: r.MaxPlayers,
+			HasPwd:    r.Password != "",
+		}
+		dtos = append(dtos, info)
+	}
+
+	jsonBytes, _ := json.Marshal(dtos)
+	this.Send(PackTextMessage("ROOM_LIST|" + string(jsonBytes)))
+	return true
+}
+
+func (this *User) HandleRoomChat(args string) bool {
+	userKey := this.DbKey
+	if userKey == "" {
+		userKey = this.Addr
+	}
+	if !AllowMessage(userKey) {
+		this.Send(PackTextMessage("发送太频繁"))
+		return true
+	}
+	if this.Room == nil {
+		this.Send(PackTextMessage("你不在任何房间中，无法发送房间消息"))
+		return true
+	}
+
+	safeMsg := WordFilter.Handle(args)
+	if len(strings.TrimSpace(safeMsg)) == 0 {
+		this.Send(PackTextMessage("不能发送空消息或非法字符"))
+		return true
+	}
+	this.Room.BroadcastTextMessage(this, safeMsg)
+
+	go PublishChatLogToMQ(this.Room.SessionID, this.Name, safeMsg)
+	return true
+}
+
+func (this *User) HandlePrivateMessage(args string) bool {
+	userKey := this.DbKey
+	if userKey == "" {
+		userKey = this.Addr
+	}
+	if !AllowMessage(userKey) {
+		this.Send(PackTextMessage("发送太频繁"))
+		return true
+	}
+	pmParts := strings.SplitN(args, "|", 2)
+	if len(pmParts) != 2 {
+		this.Send(PackTextMessage("私聊格式错误, 应为: pm|用户名|消息内容"))
+		return true
+	}
+
+	targetName := pmParts[0]
+	msg := pmParts[1]
+
+	this.server.mapLock.RLock()
+	targetUser, ok := this.server.OnlineMap[targetName]
+	this.server.mapLock.RUnlock()
+
+	if !ok {
+		this.Send(PackTextMessage(fmt.Sprintf("用户 '%s' 不在线或不存在", targetName)))
+		return true
+	}
+	if targetUser.Name == this.Name {
+		this.Send(PackTextMessage("不能给自己发私聊"))
+		return true
+	}
+
+	safeMsg := WordFilter.Handle(msg)
+
+	formattedMsg := fmt.Sprintf("[私聊][%s对你说]: %s", this.Name, safeMsg)
+	targetUser.Send(PackTextMessage(formattedMsg))
+
+	formattedMsgToSelf := fmt.Sprintf("[私聊][你对%s说]: %s", targetName, safeMsg)
+	this.Send(PackTextMessage(formattedMsgToSelf))
+
+	var sessionID string
+	if this.Name < targetName {
+		sessionID = "PM_" + this.Name + "_" + targetName
+	} else {
+		sessionID = "PM_" + targetName + "_" + this.Name
+	}
+
+	go PublishChatLogToMQ(sessionID, this.Name, safeMsg)
+
+	return true
+}
+
+func (this *User) HandleGetUsersJSON(args string) bool {
+	this.server.mapLock.RLock()
+	defer this.server.mapLock.RUnlock()
+
+	var userList []string
+	for name := range this.server.OnlineMap {
+		// 也可以在这里直接过滤掉自己，或者交给客户端过滤
+		// 为了通用性，我们返回所有人
+		userList = append(userList, name)
+	}
+
+	// 序列化为 JSON
+	jsonBytes, _ := json.Marshal(userList)
+
+	// 发送消息头 USER_LIST|JSON数据
+	this.Send(PackTextMessage("USER_LIST|" + string(jsonBytes)))
+	return true
+}
+
+// 监听消息 (逻辑不变)
+func (this *User) ListenMessage() {
+	fmt.Printf("用户 %s 的 ListenMessage 协程已成功开始运行。\n", this.Name)
+	for data := range this.Channel {
+		bytebuf := bytes.NewBuffer([]byte{})
+		binary.Write(bytebuf, binary.BigEndian, int16(len(data)))
+		binary.Write(bytebuf, binary.BigEndian, data)
+		finalData := bytebuf.Bytes()
+
+		if _, err := this.conn.Write(finalData); err != nil {
+			break
+		}
+	}
+}
+
+// 【新增方法 - 安全检查 1: 发包频率】
+func (this *User) IsPacketRateValid() bool {
+	// 检查距离上次检查是否已超过1秒
+	if time.Since(this.lastPacketCheckTime) > time.Second {
+		// 超过1秒，重置计数器和计时器
+		this.packetCount = 0
+		this.lastPacketCheckTime = time.Now()
+	}
+
+	// 计数器增加
+	this.packetCount++
+
+	// 判断是否超过了配置中的阈值
+	return this.packetCount <= Conf.Server.MaxPacketsPerSecond
+}
+
+// 【新增方法 - 安全检查 2: 移动合法性】
+func (this *User) IsMovementValid(newPos PlayerPosition) bool {
+	// 【普适性检查】：如果是服务器预期的传送（比如刚进房间、传送门）
+	if this.expectTeleport {
+		fmt.Printf("用户 [%s] 执行了合法的逻辑传送，跳过速度检测。\n", this.Name)
+		this.expectTeleport = false // 消耗掉这张“特赦令”
+		return true
+	}
+
+	// --- 以下是正常的移动速度检测 ---
+	deltaTime := time.Since(this.lastPositionUpdateTime).Seconds()
+	if deltaTime <= 0 {
+		return false
+	}
+
+	distanceSq := (newPos.X-this.Position.X)*(newPos.X-this.Position.X) +
+		(newPos.Y-this.Position.Y)*(newPos.Y-this.Position.Y) +
+		(newPos.Z-this.Position.Z)*(newPos.Z-this.Position.Z)
+
+	speedSq := float64(distanceSq) / (deltaTime * deltaTime)
+	maxSpeedSq := Conf.Server.MaxPlayerSpeed * Conf.Server.MaxPlayerSpeed
+
+	return speedSq <= maxSpeedSq*1.2*1.2
+}
+
+func (this *User) ForceTeleport(newPos PlayerPosition) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	// 1. 设置标记：告诉安全检查，接下来的位置大跳跃是合法的
+	this.expectTeleport = true
+
+	// 2. 更新服务器记录的权威位置
+	this.Position = newPos
+
+	// 3. 更新时间戳，防止时间差计算错误
+	this.lastPositionUpdateTime = time.Now()
+
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\internal\ws_proxy.go
+package internal
+
+import (
+	"encoding/binary"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+
+	"github.com/gorilla/websocket"
+)
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true }, // 允许跨域
+}
+
+// 启动 WebSocket 代理
+func StartWebSocketProxy(wsPort int, tcpAddr string) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		handleWS(w, r, tcpAddr)
+	})
+
+	log.Printf("WebSocket 代理启动: :%d -> %s", wsPort, tcpAddr)
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", wsPort), nil); err != nil {
+		log.Fatal("WS 启动失败:", err)
+	}
+}
+
+func handleWS(w http.ResponseWriter, r *http.Request, tcpAddr string) {
+	// 1. 升级 HTTP 为 WebSocket
+	wsConn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer wsConn.Close()
+
+	// 2. 连接本地 TCP 游戏服
+	tcpConn, err := net.Dial("tcp", tcpAddr)
+	if err != nil {
+		log.Println("连接 TCP 失败:", err)
+		return
+	}
+	defer tcpConn.Close()
+
+	// 3. 开始双向转发
+	errChan := make(chan error, 2)
+
+	// A. WS -> TCP (加上 2字节长度头)
+	go func() {
+		for {
+			_, msg, err := wsConn.ReadMessage()
+			if err != nil {
+				errChan <- err
+				return
+			}
+			// 封装协议头
+			header := make([]byte, 2)
+			binary.BigEndian.PutUint16(header, uint16(len(msg)))
+
+			// 发送头 + 体
+			tcpConn.Write(header)
+			tcpConn.Write(msg)
+		}
+	}()
+
+	// B. TCP -> WS (去掉 2字节长度头)
+	go func() {
+		header := make([]byte, 2)
+		for {
+			// 读头
+			if _, err := io.ReadFull(tcpConn, header); err != nil {
+				errChan <- err
+				return
+			}
+			length := binary.BigEndian.Uint16(header)
+
+			// 读体
+			body := make([]byte, length)
+			if _, err := io.ReadFull(tcpConn, body); err != nil {
+				errChan <- err
+				return
+			}
+
+			// 直接发给 WS (WS 协议自带分包，不需要头)
+			if err := wsConn.WriteMessage(websocket.TextMessage, body); err != nil {
+				errChan <- err
+				return
+			}
+		}
+	}()
+
+	<-errChan // 等待任意一方断开
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\proto\leaderboard.pb.go
+// 指定 proto3 语法
+
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// versions:
+// 	protoc-gen-go v1.36.6
+// 	protoc        v6.31.0--rc2
+// source: proto/leaderboard.proto
+
+// 包名，防止命名冲突
+
+package proto
+
+import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
+)
+
+const (
+	// Verify that this generated code is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(20 - protoimpl.MinVersion)
+	// Verify that runtime/protoimpl is sufficiently up-to-date.
+	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
+)
+
+// 提交分数的请求
+type SubmitScoreRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PlayerName    string                 `protobuf:"bytes,1,opt,name=player_name,json=playerName,proto3" json:"player_name,omitempty"` // 玩家名 (也可以用之前的 DbKey)
+	Score         int32                  `protobuf:"varint,2,opt,name=score,proto3" json:"score,omitempty"`                            // 本次获得的分数 (注意：这里应该是总分，或者服务端逻辑去累加)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SubmitScoreRequest) Reset() {
+	*x = SubmitScoreRequest{}
+	mi := &file_proto_leaderboard_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubmitScoreRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubmitScoreRequest) ProtoMessage() {}
+
+func (x *SubmitScoreRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_leaderboard_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubmitScoreRequest.ProtoReflect.Descriptor instead.
+func (*SubmitScoreRequest) Descriptor() ([]byte, []int) {
+	return file_proto_leaderboard_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *SubmitScoreRequest) GetPlayerName() string {
+	if x != nil {
+		return x.PlayerName
+	}
+	return ""
+}
+
+func (x *SubmitScoreRequest) GetScore() int32 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+// 提交分数的响应 (可以为空，表示成功即可)
+type SubmitScoreResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SubmitScoreResponse) Reset() {
+	*x = SubmitScoreResponse{}
+	mi := &file_proto_leaderboard_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubmitScoreResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubmitScoreResponse) ProtoMessage() {}
+
+func (x *SubmitScoreResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_leaderboard_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubmitScoreResponse.ProtoReflect.Descriptor instead.
+func (*SubmitScoreResponse) Descriptor() ([]byte, []int) {
+	return file_proto_leaderboard_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *SubmitScoreResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+// 获取排行榜的请求
+type GetTopPlayersRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Limit         int32                  `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"` // 希望获取前几名
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetTopPlayersRequest) Reset() {
+	*x = GetTopPlayersRequest{}
+	mi := &file_proto_leaderboard_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetTopPlayersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetTopPlayersRequest) ProtoMessage() {}
+
+func (x *GetTopPlayersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_leaderboard_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetTopPlayersRequest.ProtoReflect.Descriptor instead.
+func (*GetTopPlayersRequest) Descriptor() ([]byte, []int) {
+	return file_proto_leaderboard_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *GetTopPlayersRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+// 单个玩家的排名信息
+type PlayerRankInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Rank          int32                  `protobuf:"varint,1,opt,name=rank,proto3" json:"rank,omitempty"`                              // 排名
+	PlayerName    string                 `protobuf:"bytes,2,opt,name=player_name,json=playerName,proto3" json:"player_name,omitempty"` // 玩家名
+	Score         int32                  `protobuf:"varint,3,opt,name=score,proto3" json:"score,omitempty"`                            // 分数
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlayerRankInfo) Reset() {
+	*x = PlayerRankInfo{}
+	mi := &file_proto_leaderboard_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlayerRankInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlayerRankInfo) ProtoMessage() {}
+
+func (x *PlayerRankInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_leaderboard_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlayerRankInfo.ProtoReflect.Descriptor instead.
+func (*PlayerRankInfo) Descriptor() ([]byte, []int) {
+	return file_proto_leaderboard_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PlayerRankInfo) GetRank() int32 {
+	if x != nil {
+		return x.Rank
+	}
+	return 0
+}
+
+func (x *PlayerRankInfo) GetPlayerName() string {
+	if x != nil {
+		return x.PlayerName
+	}
+	return ""
+}
+
+func (x *PlayerRankInfo) GetScore() int32 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+// 获取排行榜的响应
+type GetTopPlayersResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 返回一个玩家排名信息的列表
+	Players       []*PlayerRankInfo `protobuf:"bytes,1,rep,name=players,proto3" json:"players,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetTopPlayersResponse) Reset() {
+	*x = GetTopPlayersResponse{}
+	mi := &file_proto_leaderboard_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetTopPlayersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetTopPlayersResponse) ProtoMessage() {}
+
+func (x *GetTopPlayersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_leaderboard_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetTopPlayersResponse.ProtoReflect.Descriptor instead.
+func (*GetTopPlayersResponse) Descriptor() ([]byte, []int) {
+	return file_proto_leaderboard_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *GetTopPlayersResponse) GetPlayers() []*PlayerRankInfo {
+	if x != nil {
+		return x.Players
+	}
+	return nil
+}
+
+var File_proto_leaderboard_proto protoreflect.FileDescriptor
+
+const file_proto_leaderboard_proto_rawDesc = "" +
+	"\n" +
+	"\x17proto/leaderboard.proto\x12\vleaderboard\"K\n" +
+	"\x12SubmitScoreRequest\x12\x1f\n" +
+	"\vplayer_name\x18\x01 \x01(\tR\n" +
+	"playerName\x12\x14\n" +
+	"\x05score\x18\x02 \x01(\x05R\x05score\"/\n" +
+	"\x13SubmitScoreResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\",\n" +
+	"\x14GetTopPlayersRequest\x12\x14\n" +
+	"\x05limit\x18\x01 \x01(\x05R\x05limit\"[\n" +
+	"\x0ePlayerRankInfo\x12\x12\n" +
+	"\x04rank\x18\x01 \x01(\x05R\x04rank\x12\x1f\n" +
+	"\vplayer_name\x18\x02 \x01(\tR\n" +
+	"playerName\x12\x14\n" +
+	"\x05score\x18\x03 \x01(\x05R\x05score\"N\n" +
+	"\x15GetTopPlayersResponse\x125\n" +
+	"\aplayers\x18\x01 \x03(\v2\x1b.leaderboard.PlayerRankInfoR\aplayers2\xbe\x01\n" +
+	"\x12LeaderboardService\x12P\n" +
+	"\vSubmitScore\x12\x1f.leaderboard.SubmitScoreRequest\x1a .leaderboard.SubmitScoreResponse\x12V\n" +
+	"\rGetTopPlayers\x12!.leaderboard.GetTopPlayersRequest\x1a\".leaderboard.GetTopPlayersResponseB\tZ\a./protob\x06proto3"
+
+var (
+	file_proto_leaderboard_proto_rawDescOnce sync.Once
+	file_proto_leaderboard_proto_rawDescData []byte
+)
+
+func file_proto_leaderboard_proto_rawDescGZIP() []byte {
+	file_proto_leaderboard_proto_rawDescOnce.Do(func() {
+		file_proto_leaderboard_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_leaderboard_proto_rawDesc), len(file_proto_leaderboard_proto_rawDesc)))
+	})
+	return file_proto_leaderboard_proto_rawDescData
+}
+
+var file_proto_leaderboard_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_proto_leaderboard_proto_goTypes = []any{
+	(*SubmitScoreRequest)(nil),    // 0: leaderboard.SubmitScoreRequest
+	(*SubmitScoreResponse)(nil),   // 1: leaderboard.SubmitScoreResponse
+	(*GetTopPlayersRequest)(nil),  // 2: leaderboard.GetTopPlayersRequest
+	(*PlayerRankInfo)(nil),        // 3: leaderboard.PlayerRankInfo
+	(*GetTopPlayersResponse)(nil), // 4: leaderboard.GetTopPlayersResponse
+}
+var file_proto_leaderboard_proto_depIdxs = []int32{
+	3, // 0: leaderboard.GetTopPlayersResponse.players:type_name -> leaderboard.PlayerRankInfo
+	0, // 1: leaderboard.LeaderboardService.SubmitScore:input_type -> leaderboard.SubmitScoreRequest
+	2, // 2: leaderboard.LeaderboardService.GetTopPlayers:input_type -> leaderboard.GetTopPlayersRequest
+	1, // 3: leaderboard.LeaderboardService.SubmitScore:output_type -> leaderboard.SubmitScoreResponse
+	4, // 4: leaderboard.LeaderboardService.GetTopPlayers:output_type -> leaderboard.GetTopPlayersResponse
+	3, // [3:5] is the sub-list for method output_type
+	1, // [1:3] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
+}
+
+func init() { file_proto_leaderboard_proto_init() }
+func file_proto_leaderboard_proto_init() {
+	if File_proto_leaderboard_proto != nil {
+		return
+	}
+	type x struct{}
+	out := protoimpl.TypeBuilder{
+		File: protoimpl.DescBuilder{
+			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_leaderboard_proto_rawDesc), len(file_proto_leaderboard_proto_rawDesc)),
+			NumEnums:      0,
+			NumMessages:   5,
+			NumExtensions: 0,
+			NumServices:   1,
+		},
+		GoTypes:           file_proto_leaderboard_proto_goTypes,
+		DependencyIndexes: file_proto_leaderboard_proto_depIdxs,
+		MessageInfos:      file_proto_leaderboard_proto_msgTypes,
+	}.Build()
+	File_proto_leaderboard_proto = out.File
+	file_proto_leaderboard_proto_goTypes = nil
+	file_proto_leaderboard_proto_depIdxs = nil
+}
+
+
+========================================
+
+// 内容来自: E:\unity project\unityserverupgrade\proto\leaderboard_grpc.pb.go
+// 指定 proto3 语法
+
+// Code generated by protoc-gen-go-grpc. DO NOT EDIT.
+// versions:
+// - protoc-gen-go-grpc v1.5.1
+// - protoc             v6.31.0--rc2
+// source: proto/leaderboard.proto
+
+// 包名，防止命名冲突
+
+package proto
+
+import (
+	context "context"
+	grpc "google.golang.org/grpc"
+	codes "google.golang.org/grpc/codes"
+	status "google.golang.org/grpc/status"
+)
+
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the grpc package it is being compiled against.
+// Requires gRPC-Go v1.64.0 or later.
+const _ = grpc.SupportPackageIsVersion9
+
+const (
+	LeaderboardService_SubmitScore_FullMethodName   = "/leaderboard.LeaderboardService/SubmitScore"
+	LeaderboardService_GetTopPlayers_FullMethodName = "/leaderboard.LeaderboardService/GetTopPlayers"
+)
+
+// LeaderboardServiceClient is the client API for LeaderboardService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// 定义排行榜服务
+type LeaderboardServiceClient interface {
+	// 客户端调用此接口提交分数
+	SubmitScore(ctx context.Context, in *SubmitScoreRequest, opts ...grpc.CallOption) (*SubmitScoreResponse, error)
+	// 客户端调用此接口获取排行榜
+	GetTopPlayers(ctx context.Context, in *GetTopPlayersRequest, opts ...grpc.CallOption) (*GetTopPlayersResponse, error)
+}
+
+type leaderboardServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewLeaderboardServiceClient(cc grpc.ClientConnInterface) LeaderboardServiceClient {
+	return &leaderboardServiceClient{cc}
+}
+
+func (c *leaderboardServiceClient) SubmitScore(ctx context.Context, in *SubmitScoreRequest, opts ...grpc.CallOption) (*SubmitScoreResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SubmitScoreResponse)
+	err := c.cc.Invoke(ctx, LeaderboardService_SubmitScore_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *leaderboardServiceClient) GetTopPlayers(ctx context.Context, in *GetTopPlayersRequest, opts ...grpc.CallOption) (*GetTopPlayersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTopPlayersResponse)
+	err := c.cc.Invoke(ctx, LeaderboardService_GetTopPlayers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// LeaderboardServiceServer is the server API for LeaderboardService service.
+// All implementations must embed UnimplementedLeaderboardServiceServer
+// for forward compatibility.
+//
+// 定义排行榜服务
+type LeaderboardServiceServer interface {
+	// 客户端调用此接口提交分数
+	SubmitScore(context.Context, *SubmitScoreRequest) (*SubmitScoreResponse, error)
+	// 客户端调用此接口获取排行榜
+	GetTopPlayers(context.Context, *GetTopPlayersRequest) (*GetTopPlayersResponse, error)
+	mustEmbedUnimplementedLeaderboardServiceServer()
+}
+
+// UnimplementedLeaderboardServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedLeaderboardServiceServer struct{}
+
+func (UnimplementedLeaderboardServiceServer) SubmitScore(context.Context, *SubmitScoreRequest) (*SubmitScoreResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SubmitScore not implemented")
+}
+func (UnimplementedLeaderboardServiceServer) GetTopPlayers(context.Context, *GetTopPlayersRequest) (*GetTopPlayersResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTopPlayers not implemented")
+}
+func (UnimplementedLeaderboardServiceServer) mustEmbedUnimplementedLeaderboardServiceServer() {}
+func (UnimplementedLeaderboardServiceServer) testEmbeddedByValue()                            {}
+
+// UnsafeLeaderboardServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to LeaderboardServiceServer will
+// result in compilation errors.
+type UnsafeLeaderboardServiceServer interface {
+	mustEmbedUnimplementedLeaderboardServiceServer()
+}
+
+func RegisterLeaderboardServiceServer(s grpc.ServiceRegistrar, srv LeaderboardServiceServer) {
+	// If the following call pancis, it indicates UnimplementedLeaderboardServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&LeaderboardService_ServiceDesc, srv)
+}
+
+func _LeaderboardService_SubmitScore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SubmitScoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LeaderboardServiceServer).SubmitScore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LeaderboardService_SubmitScore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LeaderboardServiceServer).SubmitScore(ctx, req.(*SubmitScoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LeaderboardService_GetTopPlayers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTopPlayersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LeaderboardServiceServer).GetTopPlayers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LeaderboardService_GetTopPlayers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LeaderboardServiceServer).GetTopPlayers(ctx, req.(*GetTopPlayersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// LeaderboardService_ServiceDesc is the grpc.ServiceDesc for LeaderboardService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var LeaderboardService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "leaderboard.LeaderboardService",
+	HandlerType: (*LeaderboardServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "SubmitScore",
+			Handler:    _LeaderboardService_SubmitScore_Handler,
+		},
+		{
+			MethodName: "GetTopPlayers",
+			Handler:    _LeaderboardService_GetTopPlayers_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/leaderboard.proto",
+}
+
+
+========================================
+

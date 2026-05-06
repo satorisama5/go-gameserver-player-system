@@ -1,0 +1,22 @@
+# 文档与笔记（不上传）
+*.md
+docs/
+
+# 本地/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Python 虚拟环境（若存在）
+.venv/
+__pycache__/
+
+# Go 构建产物与测试缓存
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.out

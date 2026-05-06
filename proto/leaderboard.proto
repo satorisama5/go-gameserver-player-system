@@ -1,0 +1,48 @@
+// 指定 proto3 语法
+syntax = "proto3";
+
+// 包名，防止命名冲突
+package leaderboard;
+
+// 为了让 Go 生成的代码放在正确的路径下
+option go_package = "./proto";
+
+// 定义排行榜服务
+service LeaderboardService {
+  // 客户端调用此接口提交分数
+  rpc SubmitScore (SubmitScoreRequest) returns (SubmitScoreResponse);
+
+  // 客户端调用此接口获取排行榜
+  rpc GetTopPlayers (GetTopPlayersRequest) returns (GetTopPlayersResponse);
+}
+
+// --- 消息定义 ---
+
+// 提交分数的请求
+message SubmitScoreRequest {
+  string player_name = 1; // 玩家名 (也可以用之前的 DbKey)
+  int32 score = 2;      // 本次获得的分数 (注意：这里应该是总分，或者服务端逻辑去累加)
+}
+
+// 提交分数的响应 (可以为空，表示成功即可)
+message SubmitScoreResponse {
+  bool success = 1;
+}
+
+// 获取排行榜的请求
+message GetTopPlayersRequest {
+  int32 limit = 1; // 希望获取前几名
+}
+
+// 单个玩家的排名信息
+message PlayerRankInfo {
+  int32 rank = 1;       // 排名
+  string player_name = 2; // 玩家名
+  int32 score = 3;      // 分数
+}
+
+// 获取排行榜的响应
+message GetTopPlayersResponse {
+  // 返回一个玩家排名信息的列表
+  repeated PlayerRankInfo players = 1;
+}
