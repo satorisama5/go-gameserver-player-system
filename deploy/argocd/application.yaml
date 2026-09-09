@@ -1,0 +1,23 @@
+# ArgoCD Application：盯着本仓库 deploy/k8s，自动同步到当前集群
+# 先装好 ArgoCD，再：kubectl apply -f deploy/argocd/application.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: u3dgame
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # 与你 GitHub 仓库一致；分支先用 upgrade-2026（有完整服务端与 k8s 清单）
+    repoURL: https://github.com/satorisama5/go-gameserver-player-system.git
+    targetRevision: upgrade-2026
+    path: deploy/k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

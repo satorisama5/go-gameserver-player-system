@@ -1,7 +1,5 @@
-# push 到 main（或手动 Run workflow）时：构建镜像并推到 Docker Hub
-# 需在 GitHub 仓库 Settings → Secrets 配置：
-#   DOCKERHUB_USERNAME
-#   DOCKERHUB_TOKEN
+# push 到 main / upgrade-2026：构建镜像推 Docker Hub，并回写 deploy/k8s 镜像 tag（供 ArgoCD 同步）
+# Secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
 name: Build and push Docker images
 
 on:
@@ -10,8 +8,6 @@ on:
   workflow_dispatch:
 
 env:
-  # 推送后镜像名：docker.io/<DOCKERHUB_USERNAME>/<name>:<tag>
-  # 与 Docker Hub 仓库 engetsu/u3dgame、engetsu/u3dgatewayd 对齐
   IMAGE_GAMED: u3dgame
   IMAGE_GATEWAYD: u3dgatewayd
 
@@ -19,10 +15,13 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 回写 commit 需要完整权限推同一分支
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -32,6 +31,10 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Short SHA
+        id: vars
+        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata (gamed)
         id: meta_gamed
@@ -72,3 +75,21 @@ jobs:
           labels: ${{ steps.meta_gatewayd.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # GitOps：把 K8s 清单里的镜像钉到本次构建的 short SHA，ArgoCD 盯 Git 变化后自动同步
+      - name: Bump K8s image tags in repo
+        run: |
+          set -e
+          SHA="${{ steps.vars.outputs.short_sha }}"
+          USER="${{ secrets.DOCKERHUB_USERNAME }}"
+          sed -i "s|image: ${USER}/u3dgame:.*|image: ${USER}/u3dgame:${SHA}|" deploy/k8s/02-u3dgame.yaml
+          sed -i "s|image: ${USER}/u3dgatewayd:.*|image: ${USER}/u3dgatewayd:${SHA}|" deploy/k8s/03-gatewayd.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/k8s/02-u3dgame.yaml deploy/k8s/03-gatewayd.yaml
+          if git diff --staged --quiet; then
+            echo "image tags already up to date"
+            exit 0
+          fi
+          git commit -m "chore: bump k8s images to ${SHA} [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
