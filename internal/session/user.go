@@ -6,19 +6,20 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	grpcnet "google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
-	grpcnet "google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	config "unityserverupgrade/internal/config"
 	mq "unityserverupgrade/internal/mq"
 	protocol "unityserverupgrade/internal/protocol"
-	pb "unityserverupgrade/proto"
 	storage "unityserverupgrade/internal/storage"
 	tool "unityserverupgrade/internal/tool"
 	world "unityserverupgrade/internal/world"
+	pb "unityserverupgrade/proto"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -40,20 +41,23 @@ type User struct {
 	Channel                chan []byte
 	conn                   net.Conn
 	server                 *world.Server
-	Room                   *world.Room
+	Room                   *world.Room //依赖world
 	Position               protocol.PlayerPosition
-	isOnline               bool       // 标记用户是否在线
-	mu                     sync.Mutex // 用于保护 isOnline 状态的锁
+	Player                 *Player // 人物属性（嵌套）
+	isOnline               bool
+	mu                     sync.Mutex
 	DbKey                  string
 	LastHeartbeat          time.Time
-	lastPositionUpdateTime time.Time // 用于移动速度校验
-	packetCount            int       // 用于发包频率统计，计数器
-	lastPacketCheckTime    time.Time // 用于发包频率统计.判断是否到达一秒
-	expectTeleport         bool      //传送不触发速度检测
-	// MSG_ID_COMMAND / MSG_ID_PLAYER_BATTLE / MSG_ID_PLAYER_REWARD 处理前暂存 Message.req_id（如击杀奖励传 gRPC）。
-	currentReqID string
-	// 【新增】指令处理器映射
-	commandHandlers map[string]CommandHandler
+	lastPositionUpdateTime time.Time
+	packetCount            int
+	lastPacketCheckTime    time.Time
+	expectTeleport         bool
+	currentReqID           string
+	commandHandlers        map[string]CommandHandler
+
+	// 上行有序队列：读协程只入队，全局 BusinessPool 串行 drain → DoMessage
+	inboundQueue     chan string
+	inboundScheduled int32 // 0/1，保证同一连接最多一个 drain 任务在池里
 }
 
 type RoomInfoDTO struct {
@@ -65,6 +69,10 @@ type RoomInfoDTO struct {
 
 func NewUser(conn net.Conn, server *world.Server) *User {
 	userAddr := conn.RemoteAddr().String()
+	inboundSize := config.Conf.Server.InboundQueueSize
+	if inboundSize <= 0 {
+		inboundSize = 64
+	}
 
 	user := &User{
 		Name:                   userAddr,
@@ -74,17 +82,21 @@ func NewUser(conn net.Conn, server *world.Server) *User {
 		server:                 server,
 		Room:                   nil,
 		Position:               config.Conf.Server.SpawnPoint,
+		Player:                 NewDefaultPlayer(),
 		isOnline:               true,
 		DbKey:                  "",
 		LastHeartbeat:          time.Now(),
 		lastPositionUpdateTime: time.Now(),
 		packetCount:            0,
 		lastPacketCheckTime:    time.Now(),
+		inboundQueue:           make(chan string, inboundSize),
 	}
 
 	// 【新增】初始化并注册所有带中间件的指令处理器
 	user.commandHandlers = make(map[string]CommandHandler)
-	user.commandHandlers["rename"] = user.LoggingMiddleware(user.HandleRename)
+	user.commandHandlers["register"] = user.LoggingMiddleware(user.HandleRegister)
+	user.commandHandlers["login"] = user.LoggingMiddleware(user.HandleLogin)
+	user.commandHandlers["rename"] = user.LoggingMiddleware(user.HandleSetDisplayName)
 	user.commandHandlers["who"] = user.LoggingMiddleware(user.HandleListUsers)
 	user.commandHandlers["create"] = user.LoggingMiddleware(user.HandleCreateRoom)
 	user.commandHandlers["join"] = user.LoggingMiddleware(user.HandleJoinRoom)
@@ -98,7 +110,23 @@ func NewUser(conn net.Conn, server *world.Server) *User {
 	user.commandHandlers["fhistory"] = user.LoggingMiddleware(user.HandleFriendHistory)
 	user.commandHandlers["users"] = user.LoggingMiddleware(user.HandleGetUsersJSON)
 	user.commandHandlers["shout"] = user.LoggingMiddleware(user.HandleShout)
+	user.commandHandlers["shop"] = user.LoggingMiddleware(user.HandleShopList)
+	user.commandHandlers["buy"] = user.LoggingMiddleware(user.HandleBuy)
+	user.commandHandlers["inventory"] = user.LoggingMiddleware(user.HandleInventory)
+	user.commandHandlers["use"] = user.LoggingMiddleware(user.HandleUseItem)
+	user.commandHandlers["equip"] = user.LoggingMiddleware(user.HandleEquipItem)
+	user.commandHandlers["mobs"] = user.LoggingMiddleware(user.HandleMobList)
+	user.commandHandlers["logout"] = user.LoggingMiddleware(user.HandleLogout)
+	user.commandHandlers["note"] = user.LoggingMiddleware(user.HandleNoteCommand)
+	user.commandHandlers["attrs"] = user.LoggingMiddleware(user.HandleAttrs)
+	user.commandHandlers["quest"] = user.LoggingMiddleware(user.HandleQuestCommand)
+	user.commandHandlers["pvp"] = user.LoggingMiddleware(user.HandlePVPCommand)
+	user.commandHandlers["scenedebug"] = user.LoggingMiddleware(user.HandleSceneDebug)
+	user.commandHandlers["warp"] = user.LoggingMiddleware(user.HandleWarp)
+	user.commandHandlers["servers"] = user.LoggingMiddleware(user.HandleServers)
+	user.commandHandlers["migrate"] = user.LoggingMiddleware(user.HandleMigrate)
 	// 战斗与击杀奖励已迁出 command：见 protocol.MSG_ID_PLAYER_BATTLE(2003) / MSG_ID_PLAYER_REWARD(2004)。
+	// 开荒笔记正式协议：MSG_ID_NOTE(2005)；command note|... 仅调试。
 
 	fmt.Printf("为用户 %s 启动 ListenMessage 协程...\n", user.Name)
 	go user.ListenMessage()
@@ -143,7 +171,11 @@ func (this *User) Offline() {
 		}
 		fmt.Printf("正在保存用户 %s 的数据到数据库 (Key: %s)...\n", this.Name, this.DbKey)
 		// 异步保存，防止阻塞
-		go storage.SavePlayerToDB(this.DbKey, this.Name, this.Position, currentRoomName)
+		attrs := protocol.DefaultCharacterAttrs()
+		if this.Player != nil {
+			attrs = this.Player.Attrs
+		}
+		go storage.SavePlayerToDB(this.DbKey, this.Name, this.Position, currentRoomName, attrs)
 	}
 
 	// 3. 房间清理逻辑 (保持不变)
@@ -218,6 +250,77 @@ func (this *User) Send(data []byte) {
 	}
 }
 
+// SubmitInbound 读协程入口：包进入本连接有序队列，由全局 BusinessPool 串行执行 DoMessage。
+// 返回 false 表示队列满或无法调度（调用方应断开连接）。
+func (this *User) SubmitInbound(msg string) bool {
+	this.mu.Lock()
+	online := this.isOnline
+	this.mu.Unlock()
+	if !online {
+		return false
+	}
+	// 包已到达即刷新活跃时间，避免业务积压时被心跳巡检误踢。
+	this.LastHeartbeat = time.Now()
+
+	select {
+	case this.inboundQueue <- msg:
+	default:
+		return false
+	}
+	this.scheduleInboundDrain()
+	return true
+}
+
+func (this *User) scheduleInboundDrain() {
+	if !atomic.CompareAndSwapInt32(&this.inboundScheduled, 0, 1) {
+		return // 已有 drain 在跑或已排队
+	}
+	pool := this.server.BusinessPool
+	if pool == nil {
+		atomic.StoreInt32(&this.inboundScheduled, 0)
+		this.drainInbound()
+		return
+	}
+	ok := pool.TrySubmit(func() {
+		this.drainInbound()
+	})
+	if !ok {
+		atomic.StoreInt32(&this.inboundScheduled, 0)
+		// 池满：同步 drain 一小段，避免包永久卡在队列；仍可能拖住读协程，但优于丢状态
+		this.drainInbound()
+	}
+}
+
+// drainInbound 串行消费本连接上行队列；同连接包顺序与读到的顺序一致。
+func (this *User) drainInbound() {
+	for {
+		for {
+			select {
+			case msg := <-this.inboundQueue:
+				this.mu.Lock()
+				online := this.isOnline
+				this.mu.Unlock()
+				if !online {
+					atomic.StoreInt32(&this.inboundScheduled, 0)
+					return
+				}
+				this.DoMessage(msg)
+			default:
+				goto drained
+			}
+		}
+	drained:
+		atomic.StoreInt32(&this.inboundScheduled, 0)
+		// 清空后若又有入队（与 SubmitInbound 竞态），重新抢一次调度，避免包卡死。
+		if len(this.inboundQueue) == 0 {
+			return
+		}
+		if !atomic.CompareAndSwapInt32(&this.inboundScheduled, 0, 1) {
+			return
+		}
+	}
+}
+
 // 消息处理入口 (逻辑不变)
 func (this *User) DoMessage(msg string) {
 	// 1) 基础限速保护
@@ -245,12 +348,12 @@ func (this *User) DoMessage(msg string) {
 	// 带 req_id 的角色行为包（命令 / 战斗 / 奖励）共用同一套接入幂等窗口。
 	needsReqIDIdem := message.ReqID != "" && (message.ID == protocol.MSG_ID_COMMAND ||
 		message.ID == protocol.MSG_ID_PLAYER_BATTLE ||
-		message.ID == protocol.MSG_ID_PLAYER_REWARD)
+		message.ID == protocol.MSG_ID_PLAYER_REWARD ||
+		message.ID == protocol.MSG_ID_NOTE)
 
-	// 5) 最小幂等预处理（同一 Addr + req_id 在窗口内只处理一次）
-	// stable key：用连接地址做幂等/回放 key+避免 rename 后 DbKey 变化导致重复 req_id 无法命中。
+	// 5) 最小幂等预处理：idem:req:{userKey}:{req_id}，见 idemUserKey() 与升级5 文档。
 	if needsReqIDIdem {
-		idemUserKey := this.Addr
+		idemUserKey := this.idemUserKey()
 		if !storage.MarkReqIDIfNew(idemUserKey, message.ReqID, 2*time.Minute) {
 			fmt.Printf("幂等拦截: user=%s req_id=%s\n", this.Name, message.ReqID)
 			storage.SaveEventLogAsync(storage.EventLog{
@@ -286,6 +389,12 @@ func (this *User) DoMessage(msg string) {
 		fmt.Printf("收到来自 [%s] 的消息ID: %d\n", this.Name, message.ID)
 	}
 
+	// 6.5) 除 register/login 外，业务包需先登录
+	if message.ID != protocol.MSG_ID_COMMAND && this.DbKey == "" {
+		this.Send(PackTextMessage("请先登录：login|账号|密码 或 login|令牌"))
+		return
+	}
+
 	// 7) 业务分发
 	switch message.ID {
 	case protocol.MSG_ID_PLAYER_MOVE_REQ:
@@ -300,16 +409,16 @@ func (this *User) DoMessage(msg string) {
 					newGID := this.Room.AOIManager.GetGridIDByPos(newPos.X, newPos.Z)
 
 					if oldGID != newGID {
-						this.Room.AOIManager.RemovePlayerFromGrid(this, oldGID)
-						this.Room.AOIManager.AddPlayerToGrid(this, newGID)
+						// 旧邻居也要 aoiResync，否则 B 飞出后 A 收不到删除，会幽灵到定时全量
+						this.Room.NotifyAOIGridChanged(this, oldGID, newGID)
 					}
 					// -----------------------
 
 					// 更新服务器权威位置
 					this.Position = newPos
 					this.lastPositionUpdateTime = time.Now()
+					this.Room.MarkPlayerDirty(this.Name)
 				} else {
-					// 校验失败（作弊），直接忽略
 					return
 				}
 			}
@@ -334,6 +443,17 @@ func (this *User) DoMessage(msg string) {
 		} else {
 			fmt.Printf("解析 PlayerKillRewardPayload 失败: %v\n", err)
 			this.Send(PackTextMessage("击杀奖励消息 JSON 解析失败"))
+		}
+
+	case protocol.MSG_ID_NOTE:
+		this.currentReqID = message.ReqID
+		defer func() { this.currentReqID = "" }()
+		var np protocol.NotePayload
+		if err := json.Unmarshal(message.Data, &np); err == nil {
+			this.dispatchRoomNote(&np)
+		} else {
+			fmt.Printf("解析 NotePayload 失败: %v\n", err)
+			this.Send(PackTextMessage("笔记消息 JSON 解析失败"))
 		}
 
 	case protocol.MSG_ID_COMMAND:
@@ -384,6 +504,11 @@ func (this *User) handleCommand(msg string) {
 		args = strings.TrimSpace(parts[1])
 	}
 
+	if !isPublicCommand(command) && this.DbKey == "" {
+		this.Send(PackTextMessage("请先登录：login|账号|密码 或 login|令牌"))
+		return
+	}
+
 	if handler, ok := this.commandHandlers[command]; ok {
 		handler(args)
 	} else {
@@ -420,106 +545,7 @@ func PackTextMessageWithReqID(msg, reqID string) []byte {
 	return jsonMsg
 }
 
-// --- 所有指令处理器 (已改造) ---
-
-func (this *User) HandleRename(args string) bool {
-	parts := strings.Split(args, "|")
-	newName := parts[0]
-	uuid := ""
-
-	if len(parts) > 1 {
-		uuid = parts[1]
-	} else {
-		uuid = this.Addr
-	}
-
-	if newName == "" {
-		this.Send(PackTextMessage("昵称不能为空"))
-		return true
-	}
-
-	if !storage.TryRenameLock(newName) {
-		this.Send(PackTextMessage("操作冲突请重试"))
-		return true
-	}
-	defer storage.UnlockRename(newName)
-
-	this.server.MapLock.Lock()
-	if _, ok := this.server.OnlineMap[newName]; ok {
-		this.server.MapLock.Unlock()
-		this.Send(PackTextMessage("昵称已被占用"))
-		return true
-	}
-	this.DbKey = fmt.Sprintf("%s_%s", uuid, newName)
-	this.server.MapLock.Unlock()
-
-	playerData, exists := storage.LoadPlayerFromDB(this.DbKey)
-
-	this.server.MapLock.Lock()
-	if _, ok := this.server.OnlineMap[newName]; ok {
-		this.server.MapLock.Unlock()
-		this.Send(PackTextMessage("昵称已被占用(并发冲突)"))
-		return true
-	}
-
-	delete(this.server.OnlineMap, this.Name)
-	this.server.OnlineMap[newName] = this
-	this.server.MapLock.Unlock()
-
-	oldName := this.Name
-	this.Name = newName
-
-	if this.Room != nil {
-		delete(this.Room.Members, oldName)
-		this.Room.Members[this.Name] = this
-	}
-
-	this.Send(PackTextMessage(fmt.Sprintf("RENAME_SUCCESS|%s", this.Name)))
-
-	if exists {
-		shouldRestorePosition := false
-		if playerData.LastScene != "" {
-			this.server.RoomLock.RLock()
-			_, roomExists := this.server.Rooms[playerData.LastScene]
-			this.server.RoomLock.RUnlock()
-
-			if roomExists {
-				shouldRestorePosition = true
-			}
-		}
-		if shouldRestorePosition {
-			// A. 房间还在：恢复旧坐标
-			savedPos := protocol.PlayerPosition{
-				X: playerData.PositionX,
-				Y: playerData.PositionY,
-				Z: playerData.PositionZ,
-			}
-			// 这是一个合法的“传送”，给个特赦令
-			this.ForceTeleport(savedPos)
-
-			// 发送指令让客户端也加载场景并传送
-			saveMsg := fmt.Sprintf("LOAD_SAVE|%s|%.2f,%.2f,%.2f",
-				playerData.LastScene, savedPos.X, savedPos.Y, savedPos.Z)
-			this.Send(PackTextMessage(saveMsg))
-
-			this.Send(PackTextMessage("欢迎回来 [发现可恢复的房间存档]"))
-		} else {
-			// B. 房间不在了：必须重置为配置的出生点！
-			// 否则 user.Position 会残留旧数据，导致下次开房位置错误
-			this.ForceTeleport(config.Conf.Server.SpawnPoint)
-
-			this.Send(PackTextMessage("欢迎回来 [上次所在的房间已解散，位置已重置]"))
-		}
-		if storage.IsUserIdentityMatched(this.DbKey, this.Name) {
-			this.Send(PackTextMessage("FRIEND_RECOVER_READY|身份校验通过，可使用 fhistory|好友名|最后seq 恢复好友私聊"))
-		}
-
-	} else {
-		this.ForceTeleport(config.Conf.Server.SpawnPoint)
-		go storage.SavePlayerToDB(this.DbKey, this.Name, this.Position, "")
-	}
-	return true
-}
+// --- 所有指令处理器 (已改造)；登录见 auth_handlers.go ---
 
 func (this *User) HandleJoinRoom(args string) bool {
 	parts := strings.Split(args, "|")
@@ -672,11 +698,7 @@ func (this *User) HandleListRooms(args string) bool {
 }
 
 func (this *User) HandleRoomChat(args string) bool {
-	userKey := this.DbKey
-	if userKey == "" {
-		userKey = this.Addr
-	}
-	if !storage.AllowMessage(userKey) {
+	if !storage.AllowMessage(this.sessionUserKey()) {
 		this.Send(PackTextMessage("发送太频繁"))
 		return true
 	}
@@ -697,11 +719,7 @@ func (this *User) HandleRoomChat(args string) bool {
 }
 
 func (this *User) HandlePrivateMessage(args string) bool {
-	userKey := this.DbKey
-	if userKey == "" {
-		userKey = this.Addr
-	}
-	if !storage.AllowMessage(userKey) {
+	if !storage.AllowMessage(this.sessionUserKey()) {
 		this.Send(PackTextMessage("发送太频繁"))
 		return true
 	}
@@ -798,7 +816,7 @@ func (this *User) HandleFriendPrivateMessage(args string) bool {
 		this.Send(PackTextMessage("请先完成改名登录后再使用好友私聊"))
 		return true
 	}
-	if !storage.AllowMessage(userKey) {
+	if !storage.AllowMessage(this.sessionUserKey()) {
 		this.Send(PackTextMessage("发送太频繁"))
 		return true
 	}
@@ -930,37 +948,7 @@ func (this *User) dispatchPlayerKillReward(p *protocol.PlayerKillRewardPayload) 
 	this.executeKillReward(killID, monsterID, p.ScoreDelta, p.GoldReward)
 }
 
-// HandleBattleCast: bcast|seq|skill|targetName
-// 说明：客户端产生战斗动作后，把动作序号 + 技能 + 目标发给服务端。
-// 服务端在房间行为管理器里做去重/乱序/缺包感知、冷却与命中判定。
-func (this *User) HandleBattleCast(args string) bool {
-	if this.Room == nil {
-		this.Send(PackTextMessage("你不在任何房间中，无法释放技能"))
-		return true
-	}
-	parts := strings.Split(args, "|")
-	if len(parts) < 3 {
-		this.Send(PackTextMessage("战斗格式错误, 应为: bcast|seq|skill|target"))
-		return true
-	}
-
-	var seq int64
-	if _, err := fmt.Sscanf(strings.TrimSpace(parts[0]), "%d", &seq); err != nil {
-		this.Send(PackTextMessage("战斗格式错误: seq 必须为数字"))
-		return true
-	}
-	skill := strings.TrimSpace(parts[1])
-	target := strings.TrimSpace(parts[2])
-	if skill == "" || target == "" {
-		this.Send(PackTextMessage("战斗格式错误: skill/target 不能为空"))
-		return true
-	}
-
-	// 结果是文本态协议，便于现有客户端直接显示与调试。
-	result := this.Room.HandleBattleCast(this, seq, skill, target)
-	this.Send(PackTextMessage(result))
-	return true
-}
+// HandleBattleCast 见 combat_handlers.go
 
 // HandleAddBuff: addbuff|buffName|durationMs(可选)
 // 说明：buff 生命周期由房间 tick 时间轮推进，不依赖独立定时器。
@@ -1046,8 +1034,8 @@ func (this *User) executeKillReward(killID, monsterID string, scoreDelta int32, 
 		return
 	}
 
-	this.Send(PackTextMessage(fmt.Sprintf("KILL_REWARD_OK|kill_id=%s|monster=%s|score+%d|gold+%d|balance=%d|req_id=%s",
-		killID, monsterID, scoreDelta, goldReward, result.GetBalance(), reqID)))
+	this.sendTextAndReqDone(fmt.Sprintf("KILL_REWARD_OK|kill_id=%s|monster=%s|score+%d|gold+%d|balance=%d|req_id=%s",
+		killID, monsterID, scoreDelta, goldReward, result.GetBalance(), reqID), "kill_reward")
 }
 
 // 监听消息 (逻辑不变)
@@ -1110,25 +1098,160 @@ func (this *User) ForceTeleport(newPos protocol.PlayerPosition) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
-	// 1. 设置标记：告诉安全检查，接下来的位置大跳跃是合法的
 	this.expectTeleport = true
-
-	// 2. 更新服务器记录的权威位置
+	oldPos := this.Position
 	this.Position = newPos
-
-	// 3. 更新时间戳，防止时间差计算错误
 	this.lastPositionUpdateTime = time.Now()
-
+	if this.Room != nil {
+		oldGID := this.Room.AOIManager.GetGridIDByPos(oldPos.X, oldPos.Z)
+		newGID := this.Room.AOIManager.GetGridIDByPos(newPos.X, newPos.Z)
+		if oldGID != newGID {
+			this.Room.NotifyAOIGridChanged(this, oldGID, newGID)
+		} else {
+			this.Room.MarkAOIResync(this.Name)
+		}
+		this.Room.MarkPlayerDirty(this.Name)
+	}
 }
 
 // ---- world.UserEntity 接口适配层（仅用于跨包解耦，不改变业务逻辑）----
 func (this *User) GetName() string { return this.Name }
+
+// idemUserKey 短窗 req_id 查重键：已登录用稳定 user_id(DbKey)，未登录用 TCP Addr。
+func (this *User) idemUserKey() string {
+	if this.DbKey != "" {
+		return this.DbKey
+	}
+	return this.Addr
+}
+
+// sessionUserKey 限流/审计等「用户维度」键：优先 DbKey，否则 Addr。
+func (this *User) sessionUserKey() string {
+	return this.idemUserKey()
+}
 
 func (this *User) GetAddr() string { return this.Addr }
 
 func (this *User) GetDbKey() string { return this.DbKey }
 
 func (this *User) GetPosition() protocol.PlayerPosition { return this.Position }
+
+func (this *User) GetATK() int64 {
+	if this.Player == nil {
+		return protocol.DefaultCharacterAttrs().ATK
+	}
+	return this.Player.Attrs.ATK
+}
+
+func (this *User) GetDEF() int64 {
+	if this.Player == nil {
+		return protocol.DefaultCharacterAttrs().DEF
+	}
+	return this.Player.Attrs.DEF
+}
+
+func (this *User) GetCombatPower() int64 {
+	if this.Player == nil {
+		return protocol.DefaultCharacterAttrs().Power()
+	}
+	return this.Player.Power()
+}
+
+func (this *User) GetRating() int {
+	if this.Player == nil {
+		return world.DefaultEloRating
+	}
+	if this.Player.Attrs.Rating <= 0 {
+		return world.DefaultEloRating
+	}
+	return this.Player.Attrs.Rating
+}
+
+func (this *User) ApplyMatchRatings(newRating, newLevel int) {
+	if this.Player == nil {
+		this.Player = NewDefaultPlayer()
+	}
+	this.Player.Attrs.Rating = newRating
+	if newLevel > 0 {
+		this.Player.Attrs.Level = newLevel
+	}
+	if this.DbKey != "" {
+		go storage.SavePlayerToDB(this.DbKey, this.Name, this.Position, func() string {
+			if this.Room != nil {
+				return this.Room.Name
+			}
+			return ""
+		}(), this.Player.Attrs)
+	}
+}
+
+func (this *User) MoveToRoom(r *world.Room) {
+	if r == nil {
+		return
+	}
+	if this.Room != nil {
+		old := this.Room.Name
+		empty := this.Room.RemoveMember(this)
+		if empty {
+			this.server.RoomLock.Lock()
+			delete(this.server.Rooms, old)
+			this.server.RoomLock.Unlock()
+		}
+	}
+	r.AddMember(this)
+}
+
+// NotifyReplaced 顶号：先通知旧连接，再异步 Offline（关连接、清路由）。
+func (this *User) NotifyReplaced(reason string) {
+	if reason == "" {
+		reason = "KICKED|reason=replaced"
+	}
+	this.Send(PackTextMessage(reason))
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		this.Offline()
+	}()
+}
+
+// BeginSoftMigrate 跨服天梯客机迁移：离房、存档空房、清路由、MIGRATE、Offline。
+func (this *User) BeginSoftMigrate(hostTCP, hostInstance, reason string) {
+	if hostTCP == "" || hostInstance == "" {
+		return
+	}
+	if this.server.Matchmaker != nil {
+		this.server.Matchmaker.Cancel(this.Name)
+	}
+	storage.CancelCrossPVP(this.DbKey)
+	if this.Room != nil {
+		roomName := this.Room.Name
+		empty := this.Room.RemoveMember(this)
+		if empty {
+			this.server.RoomLock.Lock()
+			delete(this.server.Rooms, roomName)
+			this.server.RoomLock.Unlock()
+		}
+	}
+	attrs := protocol.DefaultCharacterAttrs()
+	if this.Player != nil {
+		attrs = this.Player.Attrs
+	}
+	if this.DbKey != "" {
+		storage.SavePlayerToDB(this.DbKey, this.Name, this.Position, "", attrs)
+	}
+	if this.Name != "" && this.Name != this.Addr {
+		storage.DelUserRoute(this.Name)
+	}
+	if reason == "" {
+		reason = "pvp_cross"
+	}
+	this.Send(PackTextMessage(fmt.Sprintf(
+		"MIGRATE|tcp=%s|instance=%s|reason=%s|hint=relogin_with_token_or_password",
+		hostTCP, hostInstance, reason)))
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		this.Offline()
+	}()
+}
 
 func (this *User) SetRoom(r *world.Room) { this.Room = r }
 

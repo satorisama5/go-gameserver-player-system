@@ -6,6 +6,8 @@ server:
   route_ttl_seconds: 30      # 用户路由在 Redis 中的TTL（秒）
   forward_listen_addr: ":18080"      # 实例内部转发HTTP监听地址
   forward_public_addr: "127.0.0.1:18080" # 其他实例可访问到本实例的转发地址
+  tcp_public_addr: "127.0.0.1:8888"  # 客户端选服/迁移应连接的 TCP 地址
+  migrate_load_threshold: 0.8       # 在线/上限超过此比例时拒绝新登录并提示去最闲实例
   max_connections: 20000 # 为“限制连接数”功能预留
   max_packets_per_second: 30   # 【新增】每秒允许接收的最大包数量
 
@@ -14,6 +16,10 @@ server:
     x: -613.0
     y: 99.0
     z: 0.0
+  # 读 I/O 与业务解耦：全局 worker 池 + 每连接有序入站队列
+  business_workers: 0        # 0=自动（约 NumCPU*4，至少 8）
+  business_queue_size: 4096
+  inbound_queue_size: 64     # 单连接待处理上行包上限，满则断连
 
 database:
   mongo_uri: "mongodb://localhost:27017"
@@ -31,6 +37,7 @@ mq:
   url: "amqp://guest:guest@localhost:5672/"
   room_queue_name: "room_chat_logs"
   private_queue_name: "private_chat_logs"
+  note_queue_name: "room_note_snapshots"
 
 # event_logs 智能分析：按窗聚合落库 + 简单告警日志 + 只读 HTTP（默认仅本机）
 event_log_analytics:
@@ -38,4 +45,11 @@ event_log_analytics:
   listen_addr: "127.0.0.1:19090"
   rollup_interval_seconds: 60
   alert_interval_seconds: 300
+
+# 账号密码 + JWT（升级5）
+# - user_id：注册时生成，= 全服 DbKey / wallet user_key（与设备 UUID 无关）
+# - 本地清库重建：go run ./cmd/cleardb（会清空 Mongo 业务表 + Redis DB0）
+auth:
+  jwt_secret: "unityserverupgrade-dev-secret-change-me"  # 生产务必更换，或用环境变量 AUTH_JWT_SECRET
+  token_ttl_hours: 168                                   # 令牌有效期（小时），默认 7 天
 

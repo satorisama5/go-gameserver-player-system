@@ -240,15 +240,18 @@ func (m *PlayerBehaviorManager) ProcessBattleCast(caster, target UserEntity, seq
 			seq, skillName, target.GetName())
 	}
 
-	// 第 5 步：计算伤害（基础伤害 + Buff 修正）。
-	damage := defaultSkillDamage
+	// 第 5 步：服务端权威伤害（属性 + 装备加成 + 伤害检测）。
+	atk := caster.GetATK()
+	def := target.GetDEF()
+	damage, ok, reason := CalcSkillDamage(atk, def, defaultSkillDamage, 0)
+	if !ok {
+		return FormatDamageReject(seq, skillName, reason)
+	}
 	// Buff 查询走独立 buff 读锁，避免与高频战斗态写锁竞争。
 	m.buffMu.RLock()
-	// 示例：攻击者有 atk_up 则加伤。
 	if _, ok := m.activeBuffs[casterName]["atk_up"]; ok {
 		damage = int64(math.Round(float64(damage) * 1.2))
 	}
-	// 示例：受击者有 shield 则减伤。
 	if _, ok := m.activeBuffs[targetName]["shield"]; ok {
 		damage = int64(math.Round(float64(damage) * 0.7))
 	}
@@ -263,8 +266,12 @@ func (m *PlayerBehaviorManager) ProcessBattleCast(caster, target UserEntity, seq
 	m.hpByUser[targetName] = hp
 	m.combatMu.Unlock()
 
-	return fmt.Sprintf("BATTLE_HIT|seq=%d|skill=%s|target=%s|damage=%d|target_hp=%d",
-		seq, skillName, targetName, damage, hp)
+	line := fmt.Sprintf("BATTLE_HIT|seq=%d|skill=%s|target=%s|damage=%d|target_hp=%d|atk=%d|def=%d",
+		seq, skillName, targetName, damage, hp, atk, def)
+	if hp <= 0 {
+		line += "|downed=1"
+	}
+	return line
 }
 
 // AddBuff 给玩家添加（或刷新）一个 Buff。
@@ -325,6 +332,14 @@ func (m *PlayerBehaviorManager) GetBattleState(userName string) string {
 	gaps := m.lastGapCount[userName]
 	hp := m.hpByUser[userName]
 	return fmt.Sprintf("BATTLE_STATE|hp=%d|last_seq=%d|missing_total=%d", hp, lastSeq, gaps)
+}
+
+// GetHP 当前战斗 HP（未入战返回 defaultHP）。
+func (m *PlayerBehaviorManager) GetHP(userName string) int64 {
+	m.combatMu.Lock()
+	defer m.combatMu.Unlock()
+	m.ensureCombatPlayerLocked(userName)
+	return m.hpByUser[userName]
 }
 
 // distanceSq 返回二维平面距离平方，避免开根号开销。

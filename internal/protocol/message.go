@@ -16,10 +16,7 @@ type PlayerState struct {
 	Position PlayerPosition `json:"pos"`
 }
 
-// S -> C: 服务器广播的完整场景状态
-type SceneStateBroadcast struct {
-	Players map[string]PlayerState `json:"players"`
-}
+// SceneStateBroadcast / MonsterState 见 scene.go
 
 // 通用消息结构，用于识别消息类型
 type Message struct {
@@ -31,7 +28,7 @@ type Message struct {
 	Ts        int64  `json:"ts,omitempty"`         // 时间戳（毫秒）
 }
 
-// C# 客户端会将 CommandMessage 对象序列化成 {"cmd":"rename|张三"}
+// C# 客户端 CommandMessage 示例：{"cmd":"login|账号|密码"} / {"cmd":"register|账号|密码|昵称"}
 // 这个结构体就是用来解析这个 JSON 的
 type CommandMessage struct {
 	Cmd string `json:"cmd"`
@@ -53,6 +50,9 @@ const (
 
 	// 角色行为大类-3：击杀奖励链路（原 killreward 命令迁移至此）
 	MSG_ID_PLAYER_REWARD = 2004 // C->S 击杀奖励：data 为 PlayerKillRewardPayload（JSON）
+
+	// 房间开荒笔记（块级乐观锁）；上下行共用，data 见 note.go
+	MSG_ID_NOTE = 2005
 )
 
 // PlayerBattlePayload 与 MSG_ID_PLAYER_BATTLE 配套。

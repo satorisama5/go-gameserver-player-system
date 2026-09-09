@@ -3,8 +3,11 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	cfg "unityserverupgrade/internal/config"
@@ -138,28 +141,75 @@ func DelUserRoute(userName string) {
 	RDB.Del(Ctx, key)
 }
 
-// SetGatewayRoute 设置网关实例到可访问地址的路由，key=route:gateway:{instanceID}
-func SetGatewayRoute(instanceID, forwardPublicAddr string, ttl time.Duration) {
-	if instanceID == "" || forwardPublicAddr == "" {
+// GatewayMeta 实例对外可达信息 + 负载（写入 route:gateway:{id}）。
+type GatewayMeta struct {
+	InstanceID string `json:"instance_id"`
+	Forward    string `json:"forward"`
+	TCP        string `json:"tcp"`
+	Online     int    `json:"online"`
+	Max        int    `json:"max"`
+}
+
+// SetGatewayMeta 写入网关元数据（JSON）；兼容旧调用方仍可通过 GetGatewayRoute 取 forward。
+func SetGatewayMeta(meta GatewayMeta, ttl time.Duration) {
+	if meta.InstanceID == "" || meta.Forward == "" {
 		return
 	}
-	key := "route:gateway:" + instanceID
-	if err := RDB.Set(Ctx, key, forwardPublicAddr, ttl).Err(); err != nil {
-		fmt.Printf("SetGatewayRoute 失败 instance=%s err=%v\n", instanceID, err)
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	key := "route:gateway:" + meta.InstanceID
+	body, err := json.Marshal(meta)
+	if err != nil {
+		fmt.Printf("SetGatewayMeta marshal 失败 instance=%s err=%v\n", meta.InstanceID, err)
+		return
+	}
+	if err := RDB.Set(Ctx, key, string(body), ttl).Err(); err != nil {
+		fmt.Printf("SetGatewayMeta 失败 instance=%s err=%v\n", meta.InstanceID, err)
 	}
 }
 
-// GetGatewayRoute 获取网关实例的可访问地址。
-func GetGatewayRoute(instanceID string) (string, bool) {
+// SetGatewayRoute 兼容旧接口：仅写 forward（无 tcp/online 时用空值补齐）。
+func SetGatewayRoute(instanceID, forwardPublicAddr string, ttl time.Duration) {
+	SetGatewayMeta(GatewayMeta{InstanceID: instanceID, Forward: forwardPublicAddr}, ttl)
+}
+
+// parseGatewayMeta 支持 JSON 元数据或旧版纯 forward 字符串。
+func parseGatewayMeta(instanceID, raw string) (GatewayMeta, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return GatewayMeta{}, false
+	}
+	var meta GatewayMeta
+	if err := json.Unmarshal([]byte(raw), &meta); err == nil && meta.Forward != "" {
+		if meta.InstanceID == "" {
+			meta.InstanceID = instanceID
+		}
+		return meta, true
+	}
+	return GatewayMeta{InstanceID: instanceID, Forward: raw}, true
+}
+
+// GetGatewayMeta 读取实例元数据。
+func GetGatewayMeta(instanceID string) (GatewayMeta, bool) {
 	if instanceID == "" {
-		return "", false
+		return GatewayMeta{}, false
 	}
 	key := "route:gateway:" + instanceID
 	v, err := RDB.Get(Ctx, key).Result()
 	if err != nil {
+		return GatewayMeta{}, false
+	}
+	return parseGatewayMeta(instanceID, v)
+}
+
+// GetGatewayRoute 获取网关 HTTP forward 地址（私聊/跨服天梯转发用）。
+func GetGatewayRoute(instanceID string) (string, bool) {
+	meta, ok := GetGatewayMeta(instanceID)
+	if !ok || meta.Forward == "" {
 		return "", false
 	}
-	return v, true
+	return meta.Forward, true
 }
 
 // DelGatewayRoute 删除网关实例路由。
@@ -169,6 +219,59 @@ func DelGatewayRoute(instanceID string) {
 	}
 	key := "route:gateway:" + instanceID
 	RDB.Del(Ctx, key)
+}
+
+// ListGatewayMetas 列出当前存活的实例元数据（依赖 TTL，过期键不会出现）。
+func ListGatewayMetas() []GatewayMeta {
+	var out []GatewayMeta
+	var cursor uint64
+	for {
+		keys, next, err := RDB.Scan(Ctx, cursor, "route:gateway:*", 50).Result()
+		if err != nil {
+			break
+		}
+		for _, key := range keys {
+			id := strings.TrimPrefix(key, "route:gateway:")
+			if id == "" || id == key {
+				continue
+			}
+			v, err := RDB.Get(Ctx, key).Result()
+			if err != nil {
+				continue
+			}
+			if meta, ok := parseGatewayMeta(id, v); ok {
+				out = append(out, meta)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Online == out[j].Online {
+			return out[i].InstanceID < out[j].InstanceID
+		}
+		return out[i].Online < out[j].Online
+	})
+	return out
+}
+
+// PickLeastLoadedGateway 选 online 最少的实例；excludeInstance 非空时优先避开本机（若仅有本机仍可返回本机）。
+func PickLeastLoadedGateway(excludeInstance string) (GatewayMeta, bool) {
+	list := ListGatewayMetas()
+	if len(list) == 0 {
+		return GatewayMeta{}, false
+	}
+	if excludeInstance == "" {
+		return list[0], true
+	}
+	for _, m := range list {
+		if m.InstanceID != excludeInstance {
+			return m, true
+		}
+	}
+	return list[0], true
 }
 
 // NextFriendConversationSeq 为好友会话分配递增序号。
@@ -199,4 +302,54 @@ func MarkReqIDIfNew(userKey, reqID string, ttl time.Duration) bool {
 		return true
 	}
 	return ok
+}
+
+// --- 房间笔记 Redis 热缓存（全文快照；权威仍以房间内存为准）---
+
+const noteCacheTTL = 24 * time.Hour
+
+func noteCacheKey(roomSessionID, noteID string) string {
+	if noteID == "" {
+		noteID = "raid"
+	}
+	return "note:snap:" + roomSessionID + ":" + noteID
+}
+
+// CacheRoomNoteSnapshot 写入 Redis 当前笔记快照（JSON）。
+func CacheRoomNoteSnapshot(roomSessionID, noteID string, doc RoomNoteDoc) {
+	if RDB == nil || roomSessionID == "" {
+		return
+	}
+	if noteID == "" {
+		noteID = "raid"
+	}
+	doc.RoomSessionID = roomSessionID
+	doc.NoteID = noteID
+	if doc.UpdatedAt == 0 {
+		doc.UpdatedAt = time.Now().Unix()
+	}
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return
+	}
+	_ = RDB.Set(Ctx, noteCacheKey(roomSessionID, noteID), body, noteCacheTTL).Err()
+}
+
+// GetCachedRoomNoteSnapshot 读取 Redis 笔记快照；未命中返回 nil。
+func GetCachedRoomNoteSnapshot(roomSessionID, noteID string) *RoomNoteDoc {
+	if RDB == nil || roomSessionID == "" {
+		return nil
+	}
+	if noteID == "" {
+		noteID = "raid"
+	}
+	s, err := RDB.Get(Ctx, noteCacheKey(roomSessionID, noteID)).Result()
+	if err != nil {
+		return nil
+	}
+	var doc RoomNoteDoc
+	if json.Unmarshal([]byte(s), &doc) != nil {
+		return nil
+	}
+	return &doc
 }

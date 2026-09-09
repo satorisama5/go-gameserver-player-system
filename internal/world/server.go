@@ -30,21 +30,29 @@ type Request struct {
 }
 
 type Server struct {
-	Ip   string
-	Port int
-	InstanceID string
-	routeTTL   time.Duration
+	Ip                string
+	Port              int
+	InstanceID        string
+	routeTTL          time.Duration
 	ForwardListenAddr string
 	ForwardPublicAddr string
+	TcpPublicAddr     string
+	MaxConnections    int
+	LoadThreshold     float64
 
 	// 【混合模式】保留 mapLock，主要用于保护读操作
-	OnlineMap map[string]UserEntity
-	MapLock   sync.RWMutex
+	OnlineMap      map[string]UserEntity // displayName -> user
+	OnlineByUserID map[string]UserEntity // account user_id -> user（顶号用）
+	MapLock        sync.RWMutex
 
 	Rooms    map[string]*Room
 	RoomLock sync.RWMutex
 
 	Requests chan Request
+
+	// BusinessPool 全局业务协程池：读协程只投递，慢逻辑在池里跑。
+	BusinessPool *WorkerPool
+	Matchmaker   *Matchmaker
 }
 
 type UserFactoryFunc func(conn net.Conn, server *Server) UserEntity
@@ -63,7 +71,8 @@ func NewServer(ip string, port int) *Server {
 		buf = 2048
 	}
 	instanceID := cfg.Conf.Server.InstanceID
-	if instanceID == "" {		instanceID = fmt.Sprintf("%s:%d", ip, port)
+	if instanceID == "" {
+		instanceID = fmt.Sprintf("%s:%d", ip, port)
 	}
 	routeTTL := time.Duration(cfg.Conf.Server.RouteTTLSeconds) * time.Second
 	if routeTTL <= 0 {
@@ -77,17 +86,36 @@ func NewServer(ip string, port int) *Server {
 	if forwardPublicAddr == "" {
 		forwardPublicAddr = "127.0.0.1" + forwardListenAddr
 	}
-	return &Server{
-		Ip:        ip,
-		Port:      port,
-		InstanceID: instanceID,
-		routeTTL:   routeTTL,
+	tcpPublic := cfg.Conf.Server.TcpPublicAddr
+	if tcpPublic == "" {
+		tcpPublic = fmt.Sprintf("127.0.0.1:%d", port)
+	}
+	maxConn := cfg.Conf.Server.MaxConnections
+	if maxConn <= 0 {
+		maxConn = 20000
+	}
+	thresh := cfg.Conf.Server.MigrateLoadThreshold
+	if thresh <= 0 || thresh > 1 {
+		thresh = 0.8
+	}
+	s := &Server{
+		Ip:                ip,
+		Port:              port,
+		InstanceID:        instanceID,
+		routeTTL:          routeTTL,
 		ForwardListenAddr: forwardListenAddr,
 		ForwardPublicAddr: forwardPublicAddr,
-		OnlineMap: make(map[string]UserEntity),
-		Rooms:     make(map[string]*Room),
-		Requests:  make(chan Request, buf),
+		TcpPublicAddr:     tcpPublic,
+		MaxConnections:    maxConn,
+		LoadThreshold:     thresh,
+		OnlineMap:         make(map[string]UserEntity),
+		OnlineByUserID:    make(map[string]UserEntity),
+		Rooms:             make(map[string]*Room),
+		Requests:          make(chan Request, buf),
+		BusinessPool:      NewWorkerPool(cfg.Conf.Server.BusinessWorkers, cfg.Conf.Server.BusinessQueueSize),
 	}
+	s.Matchmaker = NewMatchmaker(s)
+	return s
 }
 
 func (this *Server) Start() {
@@ -176,16 +204,18 @@ func (this *Server) RunLoop() {
 			this.MapLock.Lock()
 			if _, ok := this.OnlineMap[req.User.GetName()]; ok {
 				delete(this.OnlineMap, req.User.GetName())
-				this.MapLock.Unlock() // 先解锁，再广播
-				storage.DelUserRoute(req.User.GetName())
-
-				broadcastMsg := "[" + req.User.GetAddr() + "]" + req.User.GetName() + " 下线了 (全局消息)"
-				fmt.Println(broadcastMsg)
-
-				this.sendBroadcastToAll(broadcastMsg)
-			} else {
-				this.MapLock.Unlock()
 			}
+			if uid := req.User.GetDbKey(); uid != "" {
+				if cur, ok := this.OnlineByUserID[uid]; ok && cur == req.User {
+					delete(this.OnlineByUserID, uid)
+				}
+			}
+			this.MapLock.Unlock()
+			storage.DelUserRoute(req.User.GetName())
+
+			broadcastMsg := "[" + req.User.GetAddr() + "]" + req.User.GetName() + " 下线了 (全局消息)"
+			fmt.Println(broadcastMsg)
+			this.sendBroadcastToAll(broadcastMsg)
 
 		case ReqTypeBroadcast:
 			this.MapLock.RLock()
@@ -215,7 +245,7 @@ func (this *Server) RefreshRoutesLoop() {
 	}
 }
 
-// RefreshGatewayLoop 定期续约本网关地址路由，供异机转发查询。
+// RefreshGatewayLoop 定期续约本网关地址与在线负载，供异机转发与选服。
 func (this *Server) RefreshGatewayLoop() {
 	interval := this.routeTTL / 3
 	if interval < 3*time.Second {
@@ -223,12 +253,42 @@ func (this *Server) RefreshGatewayLoop() {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	storage.SetGatewayRoute(this.InstanceID, this.ForwardPublicAddr, this.routeTTL)
+	this.PublishGatewayMeta()
 
 	for range ticker.C {
-		storage.SetGatewayRoute(this.InstanceID, this.ForwardPublicAddr, this.routeTTL)
+		this.PublishGatewayMeta()
 	}
 }
+
+// PublishGatewayMeta 把 forward/tcp/online 写入 Redis。
+func (this *Server) PublishGatewayMeta() {
+	this.MapLock.RLock()
+	online := len(this.OnlineMap)
+	this.MapLock.RUnlock()
+	storage.SetGatewayMeta(storage.GatewayMeta{
+		InstanceID: this.InstanceID,
+		Forward:    this.ForwardPublicAddr,
+		TCP:        this.TcpPublicAddr,
+		Online:     online,
+		Max:        this.MaxConnections,
+	}, this.routeTTL)
+}
+
+// OnlineCount 当前本机连接会话数（含未登录占位）。
+func (this *Server) OnlineCount() int {
+	this.MapLock.RLock()
+	defer this.MapLock.RUnlock()
+	return len(this.OnlineMap)
+}
+
+// IsOverloaded 在线占比是否超过阈值（用于拒绝新登录并提示换服）。
+func (this *Server) IsOverloaded() bool {
+	if this.MaxConnections <= 0 {
+		return false
+	}
+	return float64(this.OnlineCount()) > float64(this.MaxConnections)*this.LoadThreshold
+}
+
 
 func (this *Server) Handler(conn net.Conn) {
 	if userFactory == nil {
@@ -255,7 +315,11 @@ func (this *Server) Handler(conn net.Conn) {
 		if _, err := io.ReadFull(conn, body); err != nil {
 			return
 		}
-		user.DoMessage(string(body))
+		// 读协程只投递；DoMessage 在有界 worker 池中按连接串行执行。
+		if !user.SubmitInbound(string(body)) {
+			log.Printf("用户入站队列或业务池已满，断开连接以防拖死读路径")
+			return
+		}
 	}
 }
 
@@ -277,4 +341,3 @@ func (this *Server) BroadCast(user UserEntity, msg string) {
 	}
 	this.Requests <- req
 }
-

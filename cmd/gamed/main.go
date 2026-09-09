@@ -1,4 +1,3 @@
-// cmd/gamed/main.go (最终修正版，可直接替换)
 package main
 
 import (
@@ -6,10 +5,11 @@ import (
 	"log"
 	"net"
 	"time"
+
 	cfg "unityserverupgrade/internal/config"
 	grpcsvc "unityserverupgrade/internal/grpc"
 	mq "unityserverupgrade/internal/mq"
-	_ "unityserverupgrade/internal/session"
+	_ "unityserverupgrade/internal/session" // 触发 init：注入 UserFactory，打断 world↔session 循环依赖
 	storage "unityserverupgrade/internal/storage"
 	tool "unityserverupgrade/internal/tool"
 	"unityserverupgrade/internal/world"
@@ -18,7 +18,6 @@ import (
 	grpcnet "google.golang.org/grpc"
 )
 
-// 这个函数现在只是一个简单的包装，调用 internal 包里的真正实现
 func StartServer() {
 	server := world.NewServer("0.0.0.0", cfg.Conf.Server.TcpPort)
 	server.Start()
@@ -32,7 +31,6 @@ func StartGrpcServer() {
 	}
 
 	s := grpcnet.NewServer()
-
 	proto.RegisterLeaderboardServiceServer(s, &grpcsvc.LeaderboardServer{})
 	proto.RegisterWalletServiceServer(s, &grpcsvc.WalletServer{})
 
@@ -49,20 +47,16 @@ func main() {
 	storage.StartKillRewardOutboxWorker(12 * time.Second)
 	mq.InitMQ()
 	mq.RunChatLogConsumer()
+	mq.RunNoteSnapshotConsumer()
 
 	tool.WordFilter = tool.NewFilterManager()
 	sensitiveWords := storage.LoadSensitiveWords()
 	tool.WordFilter.Build(sensitiveWords)
 
 	go StartGrpcServer()
-
 	go StartServer()
-
 	storage.StartEventLogAnalytics()
 
-	//go internal.StartWebSocketProxy(8889, "127.0.0.1:8888")
-
 	fmt.Println("Go 服务端 (TCP + gRPC) 已启动")
-
 	select {}
 }

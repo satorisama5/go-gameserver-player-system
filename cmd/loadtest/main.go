@@ -194,13 +194,13 @@ func runRealPlayer(addr string, id int, duration time.Duration, alive, dialFail 
 		return true
 	}
 
-	// 1. 先发 rename：cmd=rename|Bot_<id>|loadtest_<id>
-	renameCmd, _ := json.Marshal(CommandMessage{Cmd: fmt.Sprintf("rename|Bot_%d|loadtest_%d", id, id)})
-	renamePkt := packPacket(Message{ID: MSG_ID_COMMAND, Data: renameCmd})
-	if !send(renamePkt) {
+	// 1. 注册/登录（升级5：账号密码 + JWT）
+	regCmd, _ := json.Marshal(CommandMessage{Cmd: fmt.Sprintf("register|loadtest_%d|loadtest123|Bot_%d", id, id)})
+	regPkt := packPacket(Message{ID: MSG_ID_COMMAND, Data: regCmd})
+	if !send(regPkt) {
 		atomic.AddInt32(dialFail, 1)
 		if id < 5 {
-			log.Printf("[%d] rename 发送失败", id)
+			log.Printf("[%d] register 发送失败", id)
 		}
 		return
 	}

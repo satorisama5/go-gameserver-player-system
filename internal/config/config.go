@@ -20,6 +20,13 @@ type Config struct {
 	AOI                AOIConfig                `mapstructure:"aoi"`
 	MQ                 MQConfig                 `mapstructure:"mq"`
 	EventLogAnalytics  EventLogAnalyticsConfig  `mapstructure:"event_log_analytics"`
+	Auth               AuthConfig               `mapstructure:"auth"`
+}
+
+// AuthConfig 账号密码 + JWT 登录。
+type AuthConfig struct {
+	JWTSecret     string `mapstructure:"jwt_secret"`
+	TokenTTLHours int    `mapstructure:"token_ttl_hours"`
 }
 
 // EventLogAnalyticsConfig event_logs 聚合、告警日志与只读 HTTP（默认仅本机）。
@@ -38,15 +45,21 @@ type ServerConfig struct {
 	RouteTTLSeconds     int            `mapstructure:"route_ttl_seconds"`
 	ForwardListenAddr   string         `mapstructure:"forward_listen_addr"`
 	ForwardPublicAddr   string         `mapstructure:"forward_public_addr"`
+	TcpPublicAddr       string         `mapstructure:"tcp_public_addr"` // 客户端应连接的 host:port；空则 127.0.0.1:{tcp_port}
+	MigrateLoadThreshold float64       `mapstructure:"migrate_load_threshold"` // 在线占比超过此值拒绝新登录并提示换服，默认 0.8
 	MaxConnections      int            `mapstructure:"max_connections"`
-	MaxPacketsPerSecond int            `mapstructure:"max_packets_per_second"`
-	MaxPlayerSpeed      float64        `mapstructure:"max_player_speed"`
+	MaxPacketsPerSecond int                     `mapstructure:"max_packets_per_second"`
+	MaxPlayerSpeed      float64                 `mapstructure:"max_player_speed"`
 	SpawnPoint          protocol.PlayerPosition `mapstructure:"spawn_point"`
+	BusinessWorkers     int                     `mapstructure:"business_workers"`
+	BusinessQueueSize   int                     `mapstructure:"business_queue_size"`
+	InboundQueueSize    int                     `mapstructure:"inbound_queue_size"`
 }
 type MQConfig struct {
-	Url               string `mapstructure:"url"`
-	RoomQueueName     string `mapstructure:"room_queue_name"`
-	PrivateQueueName  string `mapstructure:"private_queue_name"`
+	Url              string `mapstructure:"url"`
+	RoomQueueName    string `mapstructure:"room_queue_name"`
+	PrivateQueueName string `mapstructure:"private_queue_name"`
+	NoteQueueName    string `mapstructure:"note_queue_name"` // 可选；空则默认 room_note_snapshots
 }
 type AOIConfig struct {
 	GridSize int `mapstructure:"grid_size"`

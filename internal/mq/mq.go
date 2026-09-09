@@ -70,6 +70,7 @@ func InitMQ() {
 	}
 
 	fmt.Printf("RabbitMQ 连接成功，队列已就绪（room=%s, private=%s）\n", roomQueue, privateQueue)
+	declareNoteQueue() // 独立笔记队列；失败不影响聊天队列
 }
 
 // PublishRoomChatLogToMQ 将房间聊天记录投递到房间队列

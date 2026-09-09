@@ -15,6 +15,7 @@ import (
 
 	cfg "unityserverupgrade/internal/config"
 	protocol "unityserverupgrade/internal/protocol"
+	"unityserverupgrade/internal/storage/inventory"
 )
 
 const (
@@ -36,6 +37,10 @@ var WalletLedgerCollection *mongo.Collection
 var EventLogCollection *mongo.Collection
 var EventLogRollupCollection *mongo.Collection
 var KillRewardOutboxCollection *mongo.Collection
+var InventoryCollection *mongo.Collection
+
+// DefaultWalletBalance 新钱包账户默认余额（演示）。
+const DefaultWalletBalance = int64(1000)
 
 var DefaultSensitiveWords = []string{
 	"外挂",
@@ -51,14 +56,15 @@ var DefaultSensitiveWords = []string{
 
 // 定义存入数据库的玩家结构 (Model)
 type PlayerModel struct {
-	UniqueKey string  `bson:"unique_key"`
-	Username  string  `bson:"username"`
-	LastIp    string  `bson:"last_ip"`
-	PositionX float32 `bson:"pos_x"`
-	PositionY float32 `bson:"pos_y"`
-	PositionZ float32 `bson:"pos_z"`
-	UpdatedAt int64   `bson:"updated_at"`
-	LastScene string  `bson:"last_scene"`
+	UniqueKey string                   `bson:"unique_key"`
+	Username  string                   `bson:"username"`
+	LastIp    string                   `bson:"last_ip"`
+	PositionX float32                  `bson:"pos_x"`
+	PositionY float32                  `bson:"pos_y"`
+	PositionZ float32                  `bson:"pos_z"`
+	UpdatedAt int64                    `bson:"updated_at"`
+	LastScene string                   `bson:"last_scene"`
+	Attrs     protocol.CharacterAttrs  `bson:"attrs,omitempty"`
 }
 
 type RoomChatLog struct {
@@ -164,6 +170,10 @@ func InitDB() {
 	EventLogCollection = DB.Collection("event_logs")
 	EventLogRollupCollection = DB.Collection("event_log_rollups")
 	KillRewardOutboxCollection = DB.Collection("kill_reward_outbox")
+	AccountCollection = DB.Collection("accounts")
+	InventoryCollection = DB.Collection("inventories")
+	InitRoomNoteCollection()
+	InitQuestCollection()
 	// 索引优化：用于幂等唯一约束 + 加速按 user_key / req_id 查询
 	if err := EnsureWalletIndexes(); err != nil {
 		log.Println("wallet 索引创建失败(不影响启动，但可能影响幂等与性能):", err)
@@ -176,6 +186,12 @@ func InitDB() {
 	}
 	if err := EnsureEventLogRollupIndexes(); err != nil {
 		log.Println("event_log_rollups 索引创建失败(不影响启动，但会影响聚合写入):", err)
+	}
+	if err := EnsureAccountIndexes(); err != nil {
+		log.Println("accounts 索引创建失败(不影响启动，但会影响注册登录):", err)
+	}
+	if err := inventory.Init(InventoryCollection); err != nil {
+		log.Println("inventories 索引创建失败(不影响启动，但会影响背包):", err)
 	}
 }
 
@@ -264,11 +280,14 @@ func SaveEventLogAsync(entry EventLog) {
 	go SaveEventLog(entry)
 }
 
-// 辅助函数：保存/更新玩家数据
-func SavePlayerToDB(uniqueKey string, name string, pos protocol.PlayerPosition, roomName string) {
-	// PlayerPosition 来自协议层
+// 辅助函数：保存/更新玩家数据（含角色属性）
+func SavePlayerToDB(uniqueKey string, name string, pos protocol.PlayerPosition, roomName string, attrs protocol.CharacterAttrs) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	if attrs.Level == 0 && attrs.MaxHP == 0 {
+		attrs = protocol.DefaultCharacterAttrs()
+	}
 
 	filter := bson.M{"unique_key": uniqueKey}
 	update := bson.M{
@@ -279,15 +298,26 @@ func SavePlayerToDB(uniqueKey string, name string, pos protocol.PlayerPosition, 
 			"pos_z":      pos.Z,
 			"last_scene": roomName,
 			"updated_at": time.Now().Unix(),
+			"attrs":      attrs,
 		},
 	}
-	// Upsert: true 表示如果不存在则插入，存在则更新
 	opts := options.Update().SetUpsert(true)
 
 	_, err := UserCollection.UpdateOne(ctx, filter, update, opts)
 	if err != nil {
 		fmt.Println("保存玩家数据失败:", err)
+		return
 	}
+	// 写库后刷新缓存
+	InvalidatePlayerCache(uniqueKey)
+}
+
+// InvalidatePlayerCache 清玩家 Redis 缓存，避免属性过期读旧值。
+func InvalidatePlayerCache(uniqueKey string) {
+	if RDB == nil || uniqueKey == "" {
+		return
+	}
+	_ = RDB.Del(Ctx, playerCacheKeyPrefix+uniqueKey).Err()
 }
 
 func LoadPlayerFromDB(uniqueKey string) (*PlayerModel, bool) {
@@ -567,7 +597,13 @@ func FindWalletLedgerByReqID(userKey, reqID string) (*WalletLedger, bool, error)
 	return &ledger, true, nil
 }
 
+// PurchaseItemAWithLedger 演示商品 item_a 扣款（gRPC PurchaseItemA）。
 func PurchaseItemAWithLedger(userKey, userName, reqID string, cost int64) (int64, bool, error) {
+	return PurchaseWithLedger(userKey, userName, reqID, "item_a", cost)
+}
+
+// PurchaseWithLedger 通用扣款账本（商城按 item_id 记账）。
+func PurchaseWithLedger(userKey, userName, reqID, itemID string, cost int64) (int64, bool, error) {
 	// 幂等：若同 req_id 已成功扣费，直接返回首次结果
 	if reqID == "" {
 		return 0, false, fmt.Errorf("req_id 不能为空")
@@ -601,7 +637,7 @@ func PurchaseItemAWithLedger(userKey, userName, reqID string, cost int64) (int64
 			UserKey:       userKey,
 			UserName:      userName,
 			ReqID:         reqID,
-			ItemID:        "item_a",
+			ItemID:        itemID,
 			Cost:          cost,
 			BalanceBefore: 0,
 			BalanceAfter:  0,
