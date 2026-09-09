@@ -2,6 +2,9 @@
 
 这个项目是一个支持多人实时交互、用 Go 实现的（游戏）后端（可配合 Unity 客户端）。
 
+> **仓库说明（重要）：** 当前 GitHub 仓库**只上传了服务端（Go）部分**，用于作品集展示与 Docker/CI 演示。  
+> **Unity 客户端工程未包含在本仓库中**（客户端仍在本地其它目录维护）。下文「可配合 Unity 客户端」指架构上可对接，不代表本仓库内有客户端源码。
+
 ## 技术栈
 
 Go · TCP · gRPC · Redis · MongoDB · RabbitMQ · Docker · GitHub Actions
@@ -23,7 +26,7 @@ MongoDB 持久化账户存档、聊天、房间（群组）、背包、钱包账
 **性能与工程化：**  
 场景分格 AOI + 增量广播；连接心跳超时下线，校验发包频率与移动合法性；敏感词过滤；Docker 多环境部署；压测验证连接、吞吐与失败率指标。
 
-## 仓库结构（本地 / 升级后）
+## 仓库结构
 
 | 路径 | 说明 |
 |------|------|
@@ -32,14 +35,12 @@ MongoDB 持久化账户存档、聊天、房间（群组）、背包、钱包账
 | `cmd/loadtest` / `cmd/cleardb` | 压测 / 清库工具 |
 | `Dockerfile.gamed` / `Dockerfile.gatewayd` | 镜像构建 |
 | `docker-compose.yml` | mongo / redis / rabbitmq / 应用 |
-| `.github/workflows/docker-publish.yml` | push `main` 自动构建并推送 Docker Hub |
+| `.github/workflows/docker-publish.yml` | push 后自动构建并推送 Docker Hub |
 
 ## 本地运行（开发）
 
 ```bash
-# 依赖（或 docker compose up mongo redis rabbitmq）
 docker compose up -d mongo redis rabbitmq
-
 go run ./cmd/gamed
 # 可选
 go run ./cmd/gatewayd
@@ -51,37 +52,30 @@ go run ./cmd/gatewayd
 
 **不是**仓库轮询代码，而是 **`git push` → GitHub webhook → Actions 构建镜像 → 推到 Docker Hub**。
 
-### 1. Docker Hub 上要做什么
+### 镜像仓库（看新镜像来这里）
 
-1. 浏览器打开 [https://hub.docker.com](https://hub.docker.com)，用与 Docker Desktop 相同的账号登录（你本机 Desktop 已登录也可点左侧 **Docker Hub** 进网页）。
-2. 右上角头像 → **Account Settings** → 看清自己的 **Username**（不一定等于邮箱前缀）。
-3. **Repositories → Create repository**，建两个（Public 即可），本项目已用：
-   - `engetsu/u3dgame`
-   - `engetsu/u3dgatewayd`
-4. **Account Settings → Security → New Access Token**（Read, Write），复制保存。
+构建成功后，镜像在 **Docker Hub**，不在 GitHub Packages：
 
-> Docker Desktop「已登录」只方便本机 `docker pull/push`；**GitHub Actions 推镜像必须再用 Access Token 配到 GitHub Secrets**，两者不是一回事。
+- [engetsu/u3dgame](https://hub.docker.com/r/engetsu/u3dgame/tags)（游戏服）
+- [engetsu/u3dgatewayd](https://hub.docker.com/r/engetsu/u3dgatewayd/tags)（gRPC 网关）
 
-### 2. GitHub Secrets
+Tags 一般有 `latest` 和 commit sha。GitHub 右侧 **Packages** 为空是正常的。
 
-仓库 → **Settings → Secrets and variables → Actions**：
-
-| Secret 名 | 值 |
-|-----------|-----|
-| `DOCKERHUB_USERNAME` | Hub 上的 Username |
-| `DOCKERHUB_TOKEN` | 上一步 Access Token |
-
-### 3. 推送代码触发构建
-
-把本仓库完整代码推到 `main`（或先推功能分支再合并）后，打开 **Actions** 查看 `Build and push Docker images`。
-
-成功后本机可验证：
+本机拉取：
 
 ```bash
 docker pull engetsu/u3dgame:latest
 docker pull engetsu/u3dgatewayd:latest
 ```
 
+### 如何触发 CI
+
+1. 向分支 **`main` 或 `upgrade-2026`** 执行 `git push`（本仓库 workflow 已监听这两支）。  
+2. 打开 GitHub 仓库顶部 **Actions** → 点开 **Build and push Docker images**，看是否绿勾。  
+3. 可选：Actions 页选该 workflow → **Run workflow**（`workflow_dispatch`；需默认分支上也有此文件时更稳）。
+
+仓库 Secrets（已配置则跳过）：`DOCKERHUB_USERNAME` = `engetsu`，`DOCKERHUB_TOKEN` = Hub Access Token。
+
 ## License
 
-自用学习 / 作品集项目。
+自用学习 / 作品集项目。服务端部分开源展示；客户端代码未上传。

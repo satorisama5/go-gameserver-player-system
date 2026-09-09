@@ -1,5 +1,6 @@
-# 文档与笔记（不上传）
+# 文档与笔记（不上传）；仓库根 README 例外
 *.md
+!README.md
 docs/
 
 # 本地/IDE
