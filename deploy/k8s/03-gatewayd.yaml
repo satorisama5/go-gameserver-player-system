@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: u3dgatewayd
-          image: engetsu/u3dgatewayd:latest
+          image: engetsu/u3dgatewayd:e560729
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
