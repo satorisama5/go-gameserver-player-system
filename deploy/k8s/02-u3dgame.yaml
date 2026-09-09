@@ -31,7 +31,7 @@ spec:
           command: ["sh", "-c", "until nc -z rabbitmq 5672; do echo waiting rabbitmq; sleep 2; done"]
       containers:
         - name: u3dgame
-          image: engetsu/u3dgame:does-not-exist-rollback-drill
+          image: engetsu/u3dgame:2656089
           imagePullPolicy: Always
           ports:
             - name: tcp
